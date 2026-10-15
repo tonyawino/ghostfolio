@@ -242,6 +242,19 @@ describe('TenantProvisioningService', () => {
     }
   );
 
+  it.each([
+    { tenantId: `${TENANT_ID}\n`, provisioningKey: PROVISIONING_KEY },
+    { tenantId: TENANT_ID, provisioningKey: `${PROVISIONING_KEY}\n` }
+  ])('rejects UUID input with a terminal newline', async (input) => {
+    await expect(service.provision(input)).rejects.toMatchObject({
+      response: { message: 'Tenant provisioning conflict' }
+    });
+    expect(
+      prismaService.tenantUserProvisioning.findFirst
+    ).not.toHaveBeenCalled();
+    expect(prismaService.$transaction).not.toHaveBeenCalled();
+  });
+
   it('never promotes the first provisioned user to ADMIN', async () => {
     const result = await service.provision({
       tenantId: TENANT_ID,
@@ -255,7 +268,8 @@ describe('TenantProvisioningService', () => {
 
   it.each([
     ['trailing non-hex character', (verifier: string) => `${verifier}g`],
-    ['odd trailing nibble', (verifier: string) => verifier.slice(0, -1)]
+    ['odd trailing nibble', (verifier: string) => verifier.slice(0, -1)],
+    ['terminal newline', (verifier: string) => `${verifier}\n`]
   ])('rejects a verifier with %s', async (_description, corruptVerifier) => {
     await service.provision({
       tenantId: TENANT_ID,

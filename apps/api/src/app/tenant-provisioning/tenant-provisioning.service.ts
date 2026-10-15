@@ -210,6 +210,8 @@ export class TenantProvisioningService {
       });
 
       if (
+        storedVerifierHex.length !== 128 ||
+        expectedVerifierHex.length !== 128 ||
         !ACCESS_TOKEN_VERIFIER_PATTERN.test(storedVerifierHex) ||
         !ACCESS_TOKEN_VERIFIER_PATTERN.test(expectedVerifierHex)
       ) {
@@ -356,8 +358,11 @@ export class TenantProvisioningService {
   }
 
   private isUuid(value: string): boolean {
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      value
+    return (
+      value.length === 36 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value
+      )
     );
   }
 }
