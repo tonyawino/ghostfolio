@@ -14,6 +14,7 @@ import { MetadataScanner } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 
 import { AppModule } from './app.module';
+import { TenantProvisioningAuthGuard } from './tenant-provisioning/tenant-provisioning-auth.guard';
 
 // The packages are ECMAScript modules, which Jest cannot load
 jest.mock('@openrouter/ai-sdk-provider', () => {
@@ -28,9 +29,9 @@ type ModuleDefinition =
 
 /**
  * The routes of the controllers which answer a request without the
- * authentication of a user or of an API key, sorted by the request method and
- * the path. A new route has to apply AuthGuard('api-key') or AuthGuard('jwt')
- * (e.g. via the decorator RequiresScope) or has to be added here.
+ * authentication of a user, an API key, or the private provisioner, sorted by
+ * the request method and the path. A new route must apply an appropriate auth
+ * guard (e.g. via RequiresScope) or be explicitly reviewed as public here.
  *
  * The MCP transport, Bull Board and the static files are not covered, as they
  * are not served by a controller
@@ -59,6 +60,8 @@ const PUBLIC_ROUTES = [
   'POST /auth/webauthn/verify-authentication',
   'POST /user'
 ];
+
+const PRIVATE_PROVISIONING_ROUTES = ['POST /internal/tenant-users'];
 
 /**
  * Gives the controllers of the module and of each module which it imports
@@ -108,14 +111,9 @@ function getPaths(target: object) {
 }
 
 /**
- * Gives the routes of the controller which apply neither AuthGuard('api-key')
- * nor AuthGuard('jwt'), each as the request method and the path
+ * Gives each controller route and its guards, including guards on its class.
  */
-function getRoutesWithoutAuthentication(controller: Type) {
-  const authenticationGuards: unknown[] = [
-    AuthGuard('api-key'),
-    AuthGuard('jwt')
-  ];
+function getRoutes(controller: Type) {
   const routeHandlersByName = controller.prototype as Record<string, object>;
 
   return new MetadataScanner()
@@ -136,14 +134,6 @@ function getRoutesWithoutAuthentication(controller: Type) {
           []) as unknown[];
       });
 
-      const hasAuthentication = guards.some((guard) => {
-        return authenticationGuards.includes(guard);
-      });
-
-      if (hasAuthentication) {
-        return [];
-      }
-
       return getPaths(controller).flatMap((controllerPath) => {
         return getPaths(routeHandler).map((routePath) => {
           const path = `${controllerPath}/${routePath}`
@@ -151,7 +141,7 @@ function getRoutesWithoutAuthentication(controller: Type) {
             .filter(Boolean)
             .join('/');
 
-          return `${RequestMethod[requestMethod]} /${path}`;
+          return { guards, path: `${RequestMethod[requestMethod]} /${path}` };
         });
       });
     });
@@ -160,13 +150,34 @@ function getRoutesWithoutAuthentication(controller: Type) {
 describe('AppModule', () => {
   it('should require the authentication for each route which is not public', async () => {
     const controllers = await getControllers(AppModule);
+    const authenticationGuards: unknown[] = [
+      AuthGuard('api-key'),
+      AuthGuard('jwt'),
+      TenantProvisioningAuthGuard
+    ];
 
     const routesWithoutAuthentication = controllers
-      .flatMap((controller) => {
-        return getRoutesWithoutAuthentication(controller);
+      .flatMap(getRoutes)
+      .filter(({ guards }) => {
+        return !guards.some((guard) => authenticationGuards.includes(guard));
       })
+      .map(({ path }) => path)
       .sort();
 
     expect(routesWithoutAuthentication).toEqual(PUBLIC_ROUTES);
+  });
+
+  it('Requires private provisioning authentication for the internal tenant-user route', async () => {
+    const controllers = await getControllers(AppModule);
+    const privateRoutes = controllers
+      .flatMap(getRoutes)
+      .filter(({ guards }) => guards.includes(TenantProvisioningAuthGuard))
+      .map(({ path }) => path)
+      .sort();
+
+    expect(privateRoutes).toEqual(PRIVATE_PROVISIONING_ROUTES);
+    for (const route of PRIVATE_PROVISIONING_ROUTES) {
+      expect(PUBLIC_ROUTES).not.toContain(route);
+    }
   });
 });

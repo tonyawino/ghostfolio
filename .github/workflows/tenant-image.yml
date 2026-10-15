@@ -1,0 +1,232 @@
+name: Tenant image
+
+on:
+  pull_request:
+    branches: ['finance-hub/3.86.0']
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: Run the disposable Compose integration suite
+        type: boolean
+        default: false
+  push:
+    tags: ['3.86.0-fh.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tenant-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/tonyawino/ghostfolio
+  NODE_VERSION: '22.23.3'
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Check release tooling and formatting
+        run: |
+          node scripts/tenant-release.mjs check
+          node --test scripts/tenant-release.test.mjs
+          npx prettier --check .github/workflows/tenant-image.yml .github/workflows/docker-image.yml .github/workflows/build-code.yml .config/tenant-node-base.json scripts/tenant-release.mjs scripts/tenant-release.test.mjs docs/tenant-provisioning.md
+          git diff --check
+      - name: Focused provisioning, user, and route-authentication tests
+        run: >-
+          npx dotenv-cli -e .env.example -- npx nx run api:test
+          --testPathPatterns='(tenant-provisioning-auth\.guard|tenant-provisioning\.(service|controller)|user\.service|app\.module)\.spec\.ts$'
+          --runInBand --skip-nx-cache
+
+  build:
+    if: github.event_name != 'push'
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the production image without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=tenant-image
+          cache-to: type=gha,mode=max,scope=tenant-image
+
+  integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.integration
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: tenant-it-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Run only the opt-in disposable integration suite
+        run: |
+          timeout 35m docker compose -f docker/compose.tenant-provisioning-test.yaml up --build --abort-on-container-exit --exit-code-from integration-tests integration-tests
+      - name: Remove disposable containers, network, and database volume
+        if: always()
+        run: docker compose -f docker/compose.tenant-provisioning-test.yaml down --volumes --remove-orphans --timeout 20
+
+  publish-image:
+    if: github.event_name == 'push' && github.repository == 'tonyawino/ghostfolio'
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      commit: ${{ steps.gate.outputs.commit }}
+      source-sha256: ${{ steps.source.outputs.sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Require a versioned tag on the derivative branch in a public repository
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^3\.86\.0-fh\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_TYPE" = tag
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = false
+          git fetch --no-tags origin '+refs/heads/finance-hub/3.86.0:refs/remotes/origin/finance-hub/3.86.0'
+          release_sha=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          test "$release_sha" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$release_sha" refs/remotes/origin/finance-hub/3.86.0
+          git merge-base --is-ancestor ef47c0d1b2c48fa4e97fb381561b514e657928cf "$release_sha"
+          bash scripts/assert-tenant-release-absent.sh
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          echo "commit=$release_sha" >> "$GITHUB_OUTPUT"
+          node scripts/tenant-release.mjs check
+      - name: Prepare the exact tagged source archive
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          archive="ghostfolio-$RELEASE_TAG-source.tar.gz"
+          git archive --format=tar --prefix="ghostfolio-$RELEASE_TAG/" "$RELEASE_SHA" | gzip -n > "release/$archive"
+          (cd release && sha256sum "$archive" > "$archive.sha256")
+          source_sha256=$(sha256sum "release/$archive" | cut -d' ' -f1)
+          echo "SOURCE_SHA256=$source_sha256" >> "$GITHUB_ENV"
+          echo "sha256=$source_sha256" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$archive" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Refuse to overwrite an existing version tag
+        run: bash scripts/assert-tenant-image-tag-absent.sh
+      - name: Publish only the explicit derivative version with attestations
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.RELEASE_SHA }}
+            org.opencontainers.image.version=${{ env.RELEASE_TAG }}
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.ghostfolio.source.archive=${{ env.SOURCE_URL }}
+            org.ghostfolio.source.sha256=${{ env.SOURCE_SHA256 }}
+          cache-from: type=gha,scope=tenant-image
+          cache-to: type=gha,mode=max,scope=tenant-image
+  release-source:
+    needs: publish-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_SHA: ${{ needs.publish-image.outputs.commit }}
+      IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+      EXPECTED_SOURCE_SHA256: ${{ needs.publish-image.outputs.source-sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.publish-image.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Recover the exact published source inputs without rebuilding the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_SHA" = "$(git rev-parse HEAD)"
+          mkdir -p release
+          archive="ghostfolio-$RELEASE_TAG-source.tar.gz"
+          git archive --format=tar --prefix="ghostfolio-$RELEASE_TAG/" "$RELEASE_SHA" | gzip -n > "release/$archive"
+          (cd release && sha256sum "$archive" > "$archive.sha256")
+          source_sha256=$(sha256sum "release/$archive" | cut -d' ' -f1)
+          test "$source_sha256" = "$EXPECTED_SOURCE_SHA256"
+          echo "SOURCE_SHA256=$source_sha256" >> "$GITHUB_ENV"
+          echo "SOURCE_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$archive" >> "$GITHUB_ENV"
+      - name: Verify public access and map immutable digests to the exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE@$IMAGE_DIGEST" --raw > release/oci-index.json
+          node scripts/tenant-release.mjs manifest release/oci-index.json "release/ghostfolio-$RELEASE_TAG-source.tar.gz" "release/ghostfolio-$RELEASE_TAG-manifest.json"
+          cat > release/notes.md <<NOTES
+          Tenant provisioning derivative of Ghostfolio 3.86.0.
+
+          Image: \`$IMAGE@$IMAGE_DIGEST\`
+          Source commit: \`$RELEASE_SHA\`
+          Exact source archive: $SOURCE_URL
+          Source SHA256: \`$SOURCE_SHA256\`
+
+          The manifest maps the OCI index and each architecture to this source and records the Node base, Dockerfile, entrypoint, lockfile, and workflow hashes. OCI provenance and SBOM attestations are published with the image. See docs/tenant-provisioning.md in the source archive for verification and rebuild instructions.
+          NOTES
+          if existing=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish); then
+            test "$(jq -r .isDraft <<<"$existing")" = true
+            test "$(jq -r .targetCommitish <<<"$existing")" = "$RELEASE_SHA"
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --latest=false --target "$RELEASE_SHA" \
+              --title "Ghostfolio $RELEASE_TAG" --notes-file release/notes.md
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "release/ghostfolio-$RELEASE_TAG-source.tar.gz" \
+            "release/ghostfolio-$RELEASE_TAG-source.tar.gz.sha256" \
+            "release/ghostfolio-$RELEASE_TAG-manifest.json" \
+            release/oci-index.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

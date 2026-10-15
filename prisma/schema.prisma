@@ -310,32 +310,47 @@ model TagsOnAccounts {
 }
 
 model User {
-  accessesGet   Access[]        @relation("accessGet")
-  accessesGive  Access[]        @relation("accessGive")
-  accessToken   String?
-  accounts      Account[]
-  activities    Order[]
-  analytics     Analytics?
-  apiKeys       ApiKey[]
-  authChallenge String?
-  authDevices   AuthDevice[]
-  createdAt     DateTime        @default(now())
-  id            String          @id @default(uuid())
-  provider      Provider        @default(ANONYMOUS)
-  role          Role            @default(USER)
-  settings      Settings?
-  subscriptions Subscription[]
-  tags          Tag[]
-  thirdPartyId  String?
-  updatedAt     DateTime        @updatedAt
-  watchlist     SymbolProfile[] @relation("UserWatchlist")
-  SymbolProfile SymbolProfile[]
+  accessesGet        Access[]                @relation("accessGet")
+  accessesGive       Access[]                @relation("accessGive")
+  accessToken        String?
+  accounts           Account[]
+  activities         Order[]
+  analytics          Analytics?
+  apiKeys            ApiKey[]
+  authChallenge      String?
+  authDevices        AuthDevice[]
+  createdAt          DateTime                @default(now())
+  id                 String                  @id @default(uuid())
+  provider           Provider                @default(ANONYMOUS)
+  role               Role                    @default(USER)
+  settings           Settings?
+  subscriptions      Subscription[]
+  tenantProvisioning TenantUserProvisioning?
+  tags               Tag[]
+  thirdPartyId       String?
+  updatedAt          DateTime                @updatedAt
+  watchlist          SymbolProfile[]         @relation("UserWatchlist")
+  SymbolProfile      SymbolProfile[]
 
   @@index([accessToken])
   @@index([createdAt])
   @@index([provider])
   @@index([role])
   @@index([thirdPartyId])
+}
+
+model TenantUserProvisioning {
+  createdAt            DateTime @default(now())
+  encryptedAccessToken Bytes
+  encryptionKeyVersion Int
+  id                   String   @id @default(uuid())
+  provisioningKey      String   @unique
+  tenantId             String   @unique
+  updatedAt            DateTime @updatedAt
+  userId               String   @unique
+  user                 User     @relation(fields: [userId], onDelete: Restrict, references: [id])
+
+  @@index([createdAt])
 }
 
 enum AccessType {

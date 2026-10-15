@@ -67,6 +67,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
 import { RedisCacheModule } from './redis-cache/redis-cache.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { SymbolModule } from './symbol/symbol.module';
+import { TenantProvisioningModule } from './tenant-provisioning/tenant-provisioning.module';
 import { UserModule } from './user/user.module';
 
 @Module({
@@ -156,6 +157,7 @@ import { UserModule } from './user/user.module';
     SubscriptionModule,
     SymbolModule,
     TagsModule,
+    TenantProvisioningModule,
     ThrottlerModule.forRootAsync({
       imports: [ConfigurationModule],
       inject: [ConfigurationService],

@@ -42,7 +42,7 @@ import { getScopesOfAccess } from '@ghostfolio/common/scopes';
 import { UserWithSettings } from '@ghostfolio/common/types';
 import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
 
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { Prisma, RequestClient, Role, User } from '@prisma/client';
@@ -594,27 +594,11 @@ export class UserService {
       data.role = hasAdmin ? 'USER' : 'ADMIN';
     }
 
-    const user = await this.prismaService.user.create({
-      data: {
-        ...data,
-        accounts: {
-          create: {
-            currency: DEFAULT_CURRENCY,
-            name: this.i18nService.getTranslation({
-              id: 'myAccount',
-              languageCode: getSupportedLanguageCode(languageCode)
-            })
-          }
-        },
-        settings: {
-          create: {
-            settings: {
-              currency: DEFAULT_CURRENCY
-            }
-          }
-        }
-      }
-    });
+    const user = await this.createUserWithDefaults(
+      this.prismaService,
+      data,
+      languageCode
+    );
 
     if (this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION')) {
       await this.prismaService.analytics.create({
@@ -640,7 +624,45 @@ export class UserService {
     return user;
   }
 
+  public async createUserWithDefaults(
+    transaction: Prisma.TransactionClient,
+    data: Prisma.UserCreateInput,
+    languageCode?: string
+  ): Promise<User> {
+    return transaction.user.create({
+      data: {
+        ...data,
+        accounts: {
+          create: {
+            currency: DEFAULT_CURRENCY,
+            name: this.i18nService.getTranslation({
+              id: 'myAccount',
+              languageCode: getSupportedLanguageCode(languageCode)
+            })
+          }
+        },
+        settings: {
+          create: {
+            settings: {
+              currency: DEFAULT_CURRENCY
+            }
+          }
+        }
+      }
+    });
+  }
+
   public async deleteUser(where: Prisma.UserWhereUniqueInput): Promise<User> {
+    if (
+      where.id &&
+      (await this.prismaService.tenantUserProvisioning.findUnique({
+        where: { userId: where.id },
+        select: { userId: true }
+      }))
+    ) {
+      throw new ConflictException('User cannot be deleted');
+    }
+
     try {
       await this.prismaService.access.deleteMany({
         where: { OR: [{ granteeUserId: where.id }, { userId: where.id }] }

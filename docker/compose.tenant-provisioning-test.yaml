@@ -1,0 +1,154 @@
+# Set COMPOSE_PROJECT_NAME to a fresh, unique value for each run. The test
+# runner and both API replicas share only this isolated internal network.
+name: ${COMPOSE_PROJECT_NAME:?Set a unique disposable COMPOSE_PROJECT_NAME}
+
+x-api-environment: &api-environment
+  ACCESS_TOKEN_SALT: synthetic-tenant-provisioning-access-salt
+  DATABASE_URL: postgresql://ghostfolio_test:disposable-only-password@postgres:5432/ghostfolio_tenant_test?connect_timeout=30
+  ENABLE_FEATURE_CRON: 'false'
+  HOST: 0.0.0.0
+  JWT_SECRET_KEY: synthetic-tenant-provisioning-jwt-secret
+  NODE_ENV: production
+  PORT: '3333'
+  REDIS_DB: '0'
+  REDIS_HOST: redis
+  REDIS_PASSWORD: synthetic-tenant-provisioning-redis-password
+  REDIS_PORT: '6379'
+  ROOT_URL: http://api:3333
+  TENANT_PROVISIONING_AUTH_TOKEN: synthetic-tenant-provisioning-auth-token
+  TENANT_PROVISIONING_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+
+services:
+  postgres:
+    image: docker.io/library/postgres@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    environment:
+      POSTGRES_DB: ghostfolio_tenant_test
+      POSTGRES_PASSWORD: disposable-only-password
+      POSTGRES_USER: ghostfolio_test
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"'
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: docker.io/library/redis@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933
+    command:
+      - redis-server
+      - --requirepass
+      - synthetic-tenant-provisioning-redis-password
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli -a "$${REDIS_PASSWORD}" ping | grep -q PONG']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    environment:
+      REDIS_PASSWORD: synthetic-tenant-provisioning-redis-password
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ghostfolio-tenant-provisioning-test-api
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose: ['3333']
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:3333/api/v1/health >/dev/null
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+
+  api-wrong-key:
+    image: ghostfolio-tenant-provisioning-test-api
+    environment:
+      <<: *api-environment
+      TENANT_PROVISIONING_ENCRYPTION_KEY: MDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDEwMTAxMDE=
+    depends_on:
+      api:
+        condition: service_healthy
+    expose: ['3333']
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:3333/api/v1/health >/dev/null
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+
+  api-disabled:
+    image: ghostfolio-tenant-provisioning-test-api
+    environment:
+      <<: *api-environment
+      TENANT_PROVISIONING_AUTH_TOKEN: ''
+      TENANT_PROVISIONING_ENCRYPTION_KEY: ''
+    depends_on:
+      api:
+        condition: service_healthy
+    expose: ['3333']
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:3333/api/v1/health >/dev/null
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+
+  integration-tests:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: builder
+    image: ghostfolio-tenant-provisioning-test-runner
+    command:
+      - npx
+      - nx
+      - run
+      - api:test
+      - --test-file
+      - tenant-provisioning.integration.spec.ts
+    environment:
+      <<: *api-environment
+      TENANT_PROVISIONING_INTEGRATION: 'true'
+      TENANT_PROVISIONING_TEST_API_URL: http://api:3333
+      TENANT_PROVISIONING_WRONG_KEY_API_URL: http://api-wrong-key:3333
+      TENANT_PROVISIONING_DISABLED_API_URL: http://api-disabled:3333
+    depends_on:
+      api:
+        condition: service_healthy
+      api-wrong-key:
+        condition: service_healthy
+      api-disabled:
+        condition: service_healthy
+    restart: 'no'
+    networks: [tenant-provisioning-test]
+
+networks:
+  tenant-provisioning-test:
+    internal: true
+
+volumes:
+  postgres-data:

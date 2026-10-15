@@ -1,0 +1,12 @@
+{
+  "reference": "docker.io/library/node:22.23.3-bookworm-slim",
+  "indexDigest": "sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392",
+  "verifiedAt": "2026-10-15",
+  "verificationCommand": "docker buildx imagetools inspect docker.io/library/node:22.23.3-bookworm-slim",
+  "officialSource": "https://github.com/nodejs/docker-node/tree/81f419144a1251854c6d9afb09eaa39928e724e8/22/bookworm-slim",
+  "platforms": {
+    "linux/amd64": "sha256:efd0ab5780c2d9ab1f0f869571a00d5edb17793bff4cce4a2792e3eb0ffc7562",
+    "linux/arm/v7": "sha256:9b2967ccd03689c31ab27c7e987f955460a9ebc1ad0e5cc77f11afb915185652",
+    "linux/arm64/v8": "sha256:b20fe038d9592822dd534600a1ddf467e985178aa3fed60ec441a056c2cc45bd"
+  }
+}
