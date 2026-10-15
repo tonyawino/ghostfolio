@@ -202,6 +202,27 @@ describe('TenantProvisioningService', () => {
     expect(userService.createUserWithDefaults).toHaveBeenCalledTimes(1);
   });
 
+  it('canonicalizes mixed-case UUIDs for lookup, storage, and replay', async () => {
+    const first = await service.provision({
+      tenantId: TENANT_ID.toUpperCase(),
+      provisioningKey: PROVISIONING_KEY.toUpperCase()
+    });
+    const replay = await service.provision({
+      tenantId: TENANT_ID,
+      provisioningKey: PROVISIONING_KEY
+    });
+
+    expect(replay).toEqual(first);
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]).toEqual(
+      expect.objectContaining({
+        tenantId: TENANT_ID,
+        provisioningKey: PROVISIONING_KEY
+      })
+    );
+    expect(userService.createUserWithDefaults).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [TENANT_ID, OTHER_PROVISIONING_KEY],
     [OTHER_TENANT_ID, PROVISIONING_KEY]
@@ -230,6 +251,26 @@ describe('TenantProvisioningService', () => {
     expect(users[0].role).toBe(Role.USER);
     expect(users[0].provider).toBe(Provider.ANONYMOUS);
     expect(result.role).toBe(Role.USER);
+  });
+
+  it.each([
+    ['trailing non-hex character', (verifier: string) => `${verifier}g`],
+    ['odd trailing nibble', (verifier: string) => verifier.slice(0, -1)]
+  ])('rejects a verifier with %s', async (_description, corruptVerifier) => {
+    await service.provision({
+      tenantId: TENANT_ID,
+      provisioningKey: PROVISIONING_KEY
+    });
+    users[0].accessToken = corruptVerifier(users[0].accessToken);
+
+    await expect(
+      service.provision({
+        tenantId: TENANT_ID,
+        provisioningKey: PROVISIONING_KEY
+      })
+    ).rejects.toMatchObject({
+      response: { message: 'Tenant provisioning conflict' }
+    });
   });
 
   it('rolls back the user and binding when initialization fails', async () => {

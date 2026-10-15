@@ -21,6 +21,7 @@ const ENCRYPTION_KEY_VERSION = 1;
 const ENCRYPTION_KEY_BYTES = 32;
 const ENCRYPTION_IV_BYTES = 12;
 const AUTHENTICATION_TAG_BYTES = 16;
+const ACCESS_TOKEN_VERIFIER_PATTERN = /^[0-9a-f]{128}$/;
 
 interface ProvisionTenantUserInput {
   tenantId: string;
@@ -49,13 +50,22 @@ export class TenantProvisioningService {
       throw new ConflictException('Tenant provisioning conflict');
     }
 
+    const canonicalTenantId = tenantId.toLowerCase();
+    const canonicalProvisioningKey = provisioningKey.toLowerCase();
+
     const encryptionKey = this.getEncryptionKey();
-    const existing = await this.findBinding({ tenantId, provisioningKey });
+    const existing = await this.findBinding({
+      tenantId: canonicalTenantId,
+      provisioningKey: canonicalProvisioningKey
+    });
 
     if (existing) {
       return this.replay(
         existing,
-        { tenantId, provisioningKey },
+        {
+          tenantId: canonicalTenantId,
+          provisioningKey: canonicalProvisioningKey
+        },
         encryptionKey
       );
     }
@@ -66,8 +76,8 @@ export class TenantProvisioningService {
     const encryptedAccessToken = this.encryptAccessToken({
       accessToken,
       encryptionKey,
-      tenantId,
-      provisioningKey,
+      tenantId: canonicalTenantId,
+      provisioningKey: canonicalProvisioningKey,
       userId
     });
 
@@ -75,7 +85,12 @@ export class TenantProvisioningService {
       return await this.prismaService.$transaction(async (transaction) => {
         const racedBinding = await transaction.tenantUserProvisioning.findFirst(
           {
-            where: { OR: [{ tenantId }, { provisioningKey }] },
+            where: {
+              OR: [
+                { tenantId: canonicalTenantId },
+                { provisioningKey: canonicalProvisioningKey }
+              ]
+            },
             include: { user: true }
           }
         );
@@ -83,7 +98,10 @@ export class TenantProvisioningService {
         if (racedBinding) {
           return this.replay(
             racedBinding,
-            { tenantId, provisioningKey },
+            {
+              tenantId: canonicalTenantId,
+              provisioningKey: canonicalProvisioningKey
+            },
             encryptionKey
           );
         }
@@ -103,8 +121,8 @@ export class TenantProvisioningService {
           data: {
             encryptedAccessToken: new Uint8Array(encryptedAccessToken),
             encryptionKeyVersion: ENCRYPTION_KEY_VERSION,
-            provisioningKey,
-            tenantId,
+            provisioningKey: canonicalProvisioningKey,
+            tenantId: canonicalTenantId,
             userId
           }
         });
@@ -117,12 +135,18 @@ export class TenantProvisioningService {
       }
 
       if (this.isUniqueConstraintError(error)) {
-        const winner = await this.findBinding({ tenantId, provisioningKey });
+        const winner = await this.findBinding({
+          tenantId: canonicalTenantId,
+          provisioningKey: canonicalProvisioningKey
+        });
 
         if (winner) {
           return this.replay(
             winner,
-            { tenantId, provisioningKey },
+            {
+              tenantId: canonicalTenantId,
+              provisioningKey: canonicalProvisioningKey
+            },
             encryptionKey
           );
         }
@@ -179,14 +203,21 @@ export class TenantProvisioningService {
         provisioningKey,
         userId: binding.userId
       });
-      const storedVerifier = Buffer.from(user.accessToken ?? '', 'hex');
-      const expectedVerifier = Buffer.from(
-        this.userService.createAccessToken({
-          password: accessToken,
-          salt: this.configurationService.get('ACCESS_TOKEN_SALT')
-        }),
-        'hex'
-      );
+      const storedVerifierHex = user.accessToken ?? '';
+      const expectedVerifierHex = this.userService.createAccessToken({
+        password: accessToken,
+        salt: this.configurationService.get('ACCESS_TOKEN_SALT')
+      });
+
+      if (
+        !ACCESS_TOKEN_VERIFIER_PATTERN.test(storedVerifierHex) ||
+        !ACCESS_TOKEN_VERIFIER_PATTERN.test(expectedVerifierHex)
+      ) {
+        throw new Error('invalid verifier');
+      }
+
+      const storedVerifier = Buffer.from(storedVerifierHex, 'hex');
+      const expectedVerifier = Buffer.from(expectedVerifierHex, 'hex');
 
       if (
         storedVerifier.length !== expectedVerifier.length ||
