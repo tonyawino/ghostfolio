@@ -6,6 +6,7 @@ import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
 import { PropertyService } from '@ghostfolio/api/services/property/property.service';
 import { TagService } from '@ghostfolio/api/services/tag/tag.service';
 
+import { ConflictException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Prisma, Provider, Role } from '@prisma/client';
@@ -59,4 +60,48 @@ describe('UserService transaction initialization', () => {
       languageCode: 'en'
     });
   });
+});
+
+describe('UserService provisioned user deletion protection', () => {
+  it.each(['synthetic-self-user', 'synthetic-admin-target'])(
+    'rejects deletion of a provisioned user (%s) before removing dependents',
+    async (userId) => {
+      const activitiesDelete = jest.fn();
+      const accessDeleteMany = jest.fn();
+      const accountDeleteMany = jest.fn();
+      const analyticsDelete = jest.fn();
+      const settingsDelete = jest.fn();
+      const userDelete = jest.fn();
+      const service = new UserService(
+        { deleteActivities: activitiesDelete } as unknown as ActivitiesService,
+        {} as ConfigurationService,
+        {} as EventEmitter2,
+        {} as I18nService,
+        {
+          access: { deleteMany: accessDeleteMany },
+          account: { deleteMany: accountDeleteMany },
+          analytics: { delete: analyticsDelete },
+          settings: { delete: settingsDelete },
+          tenantUserProvisioning: {
+            findUnique: jest.fn().mockResolvedValue({ userId })
+          },
+          user: { delete: userDelete }
+        } as unknown as PrismaService,
+        {} as PropertyService,
+        {} as SubscriptionService,
+        {} as TagService,
+        {} as ThrottlerStorage
+      );
+
+      await expect(service.deleteUser({ id: userId })).rejects.toBeInstanceOf(
+        ConflictException
+      );
+      expect(accessDeleteMany).not.toHaveBeenCalled();
+      expect(accountDeleteMany).not.toHaveBeenCalled();
+      expect(analyticsDelete).not.toHaveBeenCalled();
+      expect(activitiesDelete).not.toHaveBeenCalled();
+      expect(settingsDelete).not.toHaveBeenCalled();
+      expect(userDelete).not.toHaveBeenCalled();
+    }
+  );
 });

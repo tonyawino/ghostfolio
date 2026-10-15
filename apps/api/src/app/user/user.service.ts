@@ -42,7 +42,7 @@ import { getScopesOfAccess } from '@ghostfolio/common/scopes';
 import { UserWithSettings } from '@ghostfolio/common/types';
 import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
 
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { Prisma, RequestClient, Role, User } from '@prisma/client';
@@ -653,6 +653,16 @@ export class UserService {
   }
 
   public async deleteUser(where: Prisma.UserWhereUniqueInput): Promise<User> {
+    if (
+      where.id &&
+      (await this.prismaService.tenantUserProvisioning.findUnique({
+        where: { userId: where.id },
+        select: { userId: true }
+      }))
+    ) {
+      throw new ConflictException('User cannot be deleted');
+    }
+
     try {
       await this.prismaService.access.deleteMany({
         where: { OR: [{ granteeUserId: where.id }, { userId: where.id }] }
