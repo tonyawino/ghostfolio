@@ -109,7 +109,9 @@ timeout 35m docker compose -f docker/compose.tenant-provisioning-test.yaml up \
 Publication requires a pushed tag matching `3.86.0-fh.N`, the exact official
 repository, a public repository, and a tag commit reachable from the fetched
 `finance-hub/3.86.0` branch and descended from the recorded upstream commit.
-Focused checks must pass before the publishing job starts. Manual runs cannot
+Focused checks must pass before the publishing job starts. GitHub release
+preflight requires a confirmed API 404; an existing release, authentication
+error, rate limit, or other uncertain response stops image publication. Manual runs cannot
 publish. The upstream Docker Hub workflow excludes derivative tags. The only
 credential is `GITHUB_TOKEN`; only the image job has `packages: write`, and only the dependent source-release
 job has `contents: write`. The image job publishes the three platform images

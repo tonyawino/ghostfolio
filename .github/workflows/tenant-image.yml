@@ -121,10 +121,7 @@ jobs:
           test "$release_sha" = "$(git rev-parse HEAD)"
           git merge-base --is-ancestor "$release_sha" refs/remotes/origin/finance-hub/3.86.0
           git merge-base --is-ancestor ef47c0d1b2c48fa4e97fb381561b514e657928cf "$release_sha"
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'Release already exists; create a new derivative version instead of replacing it.' >&2
-            exit 1
-          fi
+          bash scripts/assert-tenant-release-absent.sh
           echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
           echo "commit=$release_sha" >> "$GITHUB_OUTPUT"
           node scripts/tenant-release.mjs check

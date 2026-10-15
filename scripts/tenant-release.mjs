@@ -133,6 +133,7 @@ export function createManifest({
     'Dockerfile',
     'docker/entrypoint.sh',
     'scripts/assert-tenant-image-tag-absent.sh',
+    'scripts/assert-tenant-release-absent.sh',
     '.github/workflows/tenant-image.yml',
     '.github/workflows/docker-image.yml',
     '.github/workflows/build-code.yml',

@@ -45,7 +45,8 @@ function fixture(callback) {
       '.github/workflows/docker-image.yml',
       '.github/workflows/build-code.yml',
       'docker/entrypoint.sh',
-      'scripts/assert-tenant-image-tag-absent.sh'
+      'scripts/assert-tenant-image-tag-absent.sh',
+      'scripts/assert-tenant-release-absent.sh'
     ]) {
       writeFileSync(
         join(root, path),
@@ -226,5 +227,50 @@ esac
       );
     }
     assert.notEqual(run('404', { MOCK_TOKEN_FAILURE: 'true' }).status, 0);
+    assert.notEqual(run('404', { RELEASE_TAG: '3.86.0-fh.1/other' }).status, 0);
+  }));
+
+test('GitHub release preflight requires confirmed 404 and refuses API/auth/transport failures', () =>
+  fixture(({ root }) => {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'curl'),
+      `#!/bin/sh
+if [ "$MOCK_TRANSPORT_FAILURE" = true ]; then exit 28; fi
+printf '%s' "$MOCK_GITHUB_STATUS"
+`
+    );
+    chmodSync(join(bin, 'curl'), 0o755);
+    const run = (status, extra = {}) =>
+      spawnSync(
+        '/bin/bash',
+        [
+          fileURLToPath(
+            new URL('./assert-tenant-release-absent.sh', import.meta.url)
+          )
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GH_TOKEN: 'synthetic-github-token',
+            RELEASE_TAG: release.tag,
+            RUNNER_TEMP: root,
+            MOCK_GITHUB_STATUS: status,
+            ...extra
+          }
+        }
+      );
+    assert.equal(run('404').status, 0);
+    for (const status of ['200', '401', '403', '429', '500', '000']) {
+      assert.notEqual(
+        run(status).status,
+        0,
+        `must reject GitHub API status ${status}`
+      );
+    }
+    assert.notEqual(run('404', { MOCK_TRANSPORT_FAILURE: 'true' }).status, 0);
     assert.notEqual(run('404', { RELEASE_TAG: '3.86.0-fh.1/other' }).status, 0);
   }));
