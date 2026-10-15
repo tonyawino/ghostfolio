@@ -132,6 +132,7 @@ services:
       - tenant-provisioning.integration.spec.ts
     environment:
       <<: *api-environment
+      TENANT_PROVISIONING_INTEGRATION: 'true'
       TENANT_PROVISIONING_TEST_API_URL: http://api:3333
       TENANT_PROVISIONING_WRONG_KEY_API_URL: http://api-wrong-key:3333
       TENANT_PROVISIONING_DISABLED_API_URL: http://api-disabled:3333
