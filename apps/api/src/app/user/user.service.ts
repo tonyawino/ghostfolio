@@ -594,27 +594,11 @@ export class UserService {
       data.role = hasAdmin ? 'USER' : 'ADMIN';
     }
 
-    const user = await this.prismaService.user.create({
-      data: {
-        ...data,
-        accounts: {
-          create: {
-            currency: DEFAULT_CURRENCY,
-            name: this.i18nService.getTranslation({
-              id: 'myAccount',
-              languageCode: getSupportedLanguageCode(languageCode)
-            })
-          }
-        },
-        settings: {
-          create: {
-            settings: {
-              currency: DEFAULT_CURRENCY
-            }
-          }
-        }
-      }
-    });
+    const user = await this.createUserWithDefaults(
+      this.prismaService,
+      data,
+      languageCode
+    );
 
     if (this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION')) {
       await this.prismaService.analytics.create({
@@ -638,6 +622,34 @@ export class UserService {
     }
 
     return user;
+  }
+
+  public async createUserWithDefaults(
+    transaction: Prisma.TransactionClient,
+    data: Prisma.UserCreateInput,
+    languageCode?: string
+  ): Promise<User> {
+    return transaction.user.create({
+      data: {
+        ...data,
+        accounts: {
+          create: {
+            currency: DEFAULT_CURRENCY,
+            name: this.i18nService.getTranslation({
+              id: 'myAccount',
+              languageCode: getSupportedLanguageCode(languageCode)
+            })
+          }
+        },
+        settings: {
+          create: {
+            settings: {
+              currency: DEFAULT_CURRENCY
+            }
+          }
+        }
+      }
+    });
   }
 
   public async deleteUser(where: Prisma.UserWhereUniqueInput): Promise<User> {
