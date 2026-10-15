@@ -132,6 +132,7 @@ export function createManifest({
   const files = [
     'Dockerfile',
     'docker/entrypoint.sh',
+    'scripts/assert-tenant-image-tag-absent.sh',
     '.github/workflows/tenant-image.yml',
     '.github/workflows/docker-image.yml',
     '.github/workflows/build-code.yml',

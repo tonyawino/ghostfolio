@@ -24,7 +24,8 @@ The image name is `ghcr.io/tonyawino/ghostfolio:3.86.0-fh.N`. Use the index dige
 from the release manifest for deployment, for example
 `ghcr.io/tonyawino/ghostfolio@sha256:<index-digest>`. The image labels also contain
 its derivative commit, source archive URL, and source checksum. No floating image
-tag is produced. Source archive links use this exact form:
+tag is produced, and the authenticated registry preflight refuses an existing
+version tag or an indeterminate registry response. Source archive links use this exact form:
 
 ```text
 https://github.com/tonyawino/ghostfolio/releases/download/3.86.0-fh.N/ghostfolio-3.86.0-fh.N-source.tar.gz
@@ -110,25 +111,34 @@ repository, a public repository, and a tag commit reachable from the fetched
 `finance-hub/3.86.0` branch and descended from the recorded upstream commit.
 Focused checks must pass before the publishing job starts. Manual runs cannot
 publish. The upstream Docker Hub workflow excludes derivative tags. The only
-credential is `GITHUB_TOKEN`; only the publishing job has `packages: write` and
-`contents: write`. It publishes the three platform images with provenance and
-SBOM, reads back the immutable registry index, then creates the public GitHub
-release with the source and manifest assets. Existing releases are not replaced.
+credential is `GITHUB_TOKEN`; only the image job has `packages: write`, and only the dependent source-release
+job has `contents: write`. The image job publishes the three platform images
+with provenance and SBOM, then outputs its immutable digest, source commit, and
+archive checksum. The separate source-release job reads that digest and creates
+the public GitHub release with the source and manifest assets. Assets are uploaded to a draft first; only a complete draft becomes public.
+Retries may finish the same draft, and existing public releases are not replaced.
 Derivative PRs are excluded from the upstream full-suite workflow.
 
 GitHub initially publishes Container registry packages as private, even when the
 source repository is public. Before the first release completes, the owner must
 set the `ghostfolio` container package to public in its GitHub package settings;
 see [GitHub's visibility instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
-The workflow reads the pushed index again using an empty Docker credential
-directory and requires it to match the authenticated index before creating the
-release. This proves anonymous access before a release digest is offered for
-Coolify. If the first run stops at this check, change package visibility and
-rerun the failed workflow; no additional publishing secret is required.
+The source-release job runs on a fresh runner with no registry login and reads
+the already-published index by digest before creating the release. This proves
+anonymous access before a release digest is offered for Coolify. If the first
+run stops at this check, change package visibility and use **Re-run failed jobs**.
+The successful image job is retained; the source-release job reuses its digest
+and verifies the regenerated source archive against its original checksum.
+Do not rerun all jobs: the image preflight intentionally refuses to overwrite
+an existing version tag. If tag preflight finds an image but there is no
+successful image job to reuse, preserve its digest and provenance, stop that
+release, and reconcile its source evidence before choosing a new version. Never
+move or overwrite the existing version tag. No additional publishing secret is
+required.
 
 Creating a release tag is a separate operator action. If publishing succeeds
 but a later source/release upload fails, the workflow run is failed; do not deploy
-that digest until its exact source assets and manifest are available. Keep the
-failed run's digest/source commit evidence and reconcile those assets before
-using a new version. Repository billing or package permissions can block hosted
+that digest until its exact source assets and manifest are available. Use **Re-run failed jobs** to retry source publication against the completed
+image job's original digest and source checksum; this never rebuilds or retags
+the image. Repository billing or package permissions can block hosted
 jobs; a local build alone does not establish that GHCR publication succeeded.

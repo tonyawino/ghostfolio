@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -9,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   checkNodeBase,
@@ -27,7 +30,12 @@ const release = {
 function fixture(callback) {
   const root = mkdtempSync(join(tmpdir(), 'tenant-release-'));
   try {
-    for (const directory of ['.config', '.github/workflows', 'docker']) {
+    for (const directory of [
+      '.config',
+      '.github/workflows',
+      'docker',
+      'scripts'
+    ]) {
       mkdirSync(join(root, directory), { recursive: true });
     }
     for (const path of [
@@ -36,7 +44,8 @@ function fixture(callback) {
       '.github/workflows/tenant-image.yml',
       '.github/workflows/docker-image.yml',
       '.github/workflows/build-code.yml',
-      'docker/entrypoint.sh'
+      'docker/entrypoint.sh',
+      'scripts/assert-tenant-image-tag-absent.sh'
     ]) {
       writeFileSync(
         join(root, path),
@@ -163,4 +172,59 @@ test('refuses drift between Dockerfile stages and the Node registry evidence', (
       readFileSync(dockerfile, 'utf8').replace('FROM node:', 'FROM node:other-')
     );
     assert.throws(() => checkNodeBase(root));
+  }));
+
+test('publication preflight allows only a confirmed absent version tag', () =>
+  fixture(({ root }) => {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'curl'),
+      `#!/bin/sh
+case "$*" in
+  *ghcr.io/token*)
+    if [ "$MOCK_TOKEN_FAILURE" = true ]; then exit 22; fi
+    printf '{"token":"synthetic-registry-token"}' ;;
+  *) printf '%s' "$MOCK_REGISTRY_STATUS" ;;
+esac
+`
+    );
+    writeFileSync(
+      join(bin, 'jq'),
+      '#!/bin/sh\ncat >/dev/null\nprintf synthetic-registry-token\n'
+    );
+    chmodSync(join(bin, 'curl'), 0o755);
+    chmodSync(join(bin, 'jq'), 0o755);
+    const run = (status, extra = {}) =>
+      spawnSync(
+        '/bin/bash',
+        [
+          fileURLToPath(
+            new URL('./assert-tenant-image-tag-absent.sh', import.meta.url)
+          )
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_ACTOR: 'synthetic-actor',
+            GH_TOKEN: 'synthetic-github-token',
+            RELEASE_TAG: release.tag,
+            RUNNER_TEMP: root,
+            MOCK_REGISTRY_STATUS: status,
+            ...extra
+          }
+        }
+      );
+    assert.equal(run('404').status, 0);
+    for (const status of ['200', '401', '403', '429', '500', '000']) {
+      assert.notEqual(
+        run(status).status,
+        0,
+        `must reject registry status ${status}`
+      );
+    }
+    assert.notEqual(run('404', { MOCK_TOKEN_FAILURE: 'true' }).status, 0);
+    assert.notEqual(run('404', { RELEASE_TAG: '3.86.0-fh.1/other' }).status, 0);
   }));
