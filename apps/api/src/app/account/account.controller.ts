@@ -25,6 +25,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpException,
   Param,
   Post,
@@ -35,6 +36,7 @@ import {
 import { Account as AccountModel } from '@prisma/client';
 import { StatusCodes, getReasonPhrase } from 'http-status-codes';
 
+import { parseIdempotencyKey } from './account-idempotency';
 import { AccountService } from './account.service';
 import { GetAllAccountsDto } from './get-all-accounts.dto';
 
@@ -149,15 +151,17 @@ export class AccountController {
   @UseInterceptors(RedactValuesInResponseInterceptor)
   public async createAccount(
     @Body() data: CreateAccountDto,
-    @Impersonation() { userId }: ImpersonationContext
+    @Impersonation() { userId }: ImpersonationContext,
+    @Headers('Idempotency-Key') idempotencyKeyHeader?: string | string[]
   ): Promise<AccountModel> {
     const { balance, tags: tagIds, ...accountData } = data;
+    const idempotencyKey = parseIdempotencyKey(idempotencyKeyHeader);
 
     if (accountData.platformId) {
       const platformId = accountData.platformId;
       delete accountData.platformId;
 
-      return this.accountService.createAccount({
+      const params = {
         balance,
         tagIds,
         userId,
@@ -166,11 +170,17 @@ export class AccountController {
           platform: { connect: { id: platformId } },
           user: { connect: { id: userId } }
         }
-      });
+      };
+      return idempotencyKey
+        ? this.accountService.createAccountIdempotently({
+            ...params,
+            idempotencyKey
+          })
+        : this.accountService.createAccount(params);
     } else {
       delete accountData.platformId;
 
-      return this.accountService.createAccount({
+      const params = {
         balance,
         tagIds,
         userId,
@@ -178,7 +188,13 @@ export class AccountController {
           ...accountData,
           user: { connect: { id: userId } }
         }
-      });
+      };
+      return idempotencyKey
+        ? this.accountService.createAccountIdempotently({
+            ...params,
+            idempotencyKey
+          })
+        : this.accountService.createAccount(params);
     }
   }
 
