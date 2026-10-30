@@ -104,6 +104,54 @@ test('accepts only explicit derivative release versions and full identities', ()
   );
 });
 
+test('focused tenant release checks include provisioning, identity, and account idempotency specs', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/tenant-image.yml', import.meta.url),
+    'utf8'
+  );
+  const [, testPattern] = workflow.match(/--testPathPatterns='([^']+)'/) ?? [];
+
+  assert.ok(testPattern, 'tenant image workflow must define focused API tests');
+  const selected = new RegExp(testPattern);
+
+  for (const spec of [
+    'tenant-provisioning-auth.guard.spec.ts',
+    'tenant-provisioning.service.spec.ts',
+    'tenant-provisioning.controller.spec.ts',
+    'user.service.spec.ts',
+    'user.controller.spec.ts',
+    'account-idempotency.spec.ts',
+    'account-idempotency.postgres.spec.ts',
+    'app.module.spec.ts'
+  ]) {
+    assert.match(spec, selected, `${spec} must be included in the image check`);
+  }
+});
+
+test('generic image publisher excludes derivative release tags', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/docker-image.yml', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(
+    workflow,
+    /tags:\s*\n\s+- '\*\.\*\.\*'\s*\n\s+- '!3\.86\.0-fh\.\*'/
+  );
+});
+
+test('tenant release checks run PostgreSQL-backed account idempotency instead of skipping it', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/tenant-image.yml', import.meta.url),
+    'utf8'
+  );
+  const checks = workflow.split('\n  build:\n', 1)[0];
+
+  assert.match(checks, /services:\s*\n\s+postgres:/);
+  assert.match(checks, /prisma migrate deploy/);
+  assert.match(checks, /ACCOUNT_IDEMPOTENCY_TEST_DATABASE_URL/);
+});
+
 test('maps each runnable digest and attestation to checksummed source and inputs', () =>
   fixture((input) => {
     const manifest = createManifest(input);

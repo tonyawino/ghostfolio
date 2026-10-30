@@ -70,6 +70,18 @@ model AccountBalance {
   @@index([date])
 }
 
+model AccountCreateIdempotency {
+  userId          String
+  operation       String
+  key             String
+  requestDigest   String
+  resultAccountId String
+  createdAt       DateTime @default(now())
+
+  @@id([userId, operation, key])
+  @@index([userId])
+}
+
 model Analytics {
   activityCount                       Int            @default(0)
   country                             String?

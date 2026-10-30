@@ -27,6 +27,20 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: docker.io/library/postgres@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+        env:
+          POSTGRES_DB: gf_account_idempotency_test
+          POSTGRES_USER: ghostfolio_test
+          POSTGRES_PASSWORD: synthetic-proof-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ghostfolio_test -d gf_account_idempotency_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -36,6 +50,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Migrate the disposable account idempotency database
+        env:
+          DATABASE_URL: postgresql://ghostfolio_test:synthetic-proof-password@127.0.0.1:5432/gf_account_idempotency_test
+          DIRECT_URL: postgresql://ghostfolio_test:synthetic-proof-password@127.0.0.1:5432/gf_account_idempotency_test
+        run: npx prisma migrate deploy
       - name: Check release tooling and formatting
         run: |
           node scripts/tenant-release.mjs check
@@ -43,9 +62,11 @@ jobs:
           npx prettier --check .github/workflows/tenant-image.yml .github/workflows/docker-image.yml .github/workflows/build-code.yml .config/tenant-node-base.json scripts/tenant-release.mjs scripts/tenant-release.test.mjs docs/tenant-provisioning.md
           git diff --check
       - name: Focused provisioning, user, and route-authentication tests
+        env:
+          ACCOUNT_IDEMPOTENCY_TEST_DATABASE_URL: postgresql://ghostfolio_test:synthetic-proof-password@127.0.0.1:5432/gf_account_idempotency_test
         run: >-
           npx dotenv-cli -e .env.example -- npx nx run api:test
-          --testPathPatterns='(tenant-provisioning-auth\.guard|tenant-provisioning\.(service|controller)|user\.service|app\.module)\.spec\.ts$'
+          --testPathPatterns='(tenant-provisioning-auth\.guard|tenant-provisioning\.(service|controller)|user\.(service|controller)|account-idempotency(\.postgres)?|app\.module)\.spec\.ts$'
           --runInBand --skip-nx-cache
 
   build:
