@@ -2,20 +2,22 @@ import { AccountBalanceService } from '@ghostfolio/api/app/account-balance/accou
 import { PortfolioChangedEvent } from '@ghostfolio/api/events/portfolio-changed.event';
 import {
   getWhereAccountBalanceNotInFuture,
-  isAccountBalanceInFuture,
   WHERE_ACCOUNT_NOT_EXCLUDED
 } from '@ghostfolio/api/helper/account.helper';
 import { ExchangeRateDataService } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service';
 import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
 import { TagService } from '@ghostfolio/api/services/tag/tag.service';
+import { TAG_ID_DRAFT } from '@ghostfolio/common/config';
 import {
   DATE_FORMAT,
-  getStartOfUtcDateOfTomorrow
+  getStartOfUtcDateOfTomorrow,
+  isAccountBalanceInFuture,
+  resetHours
 } from '@ghostfolio/common/helper';
 import { Filter } from '@ghostfolio/common/interfaces';
 import { AccountWithBalance } from '@ghostfolio/common/types';
 
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   Account,
@@ -27,9 +29,14 @@ import {
   Tag
 } from '@prisma/client';
 import { Big } from 'big.js';
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
+import { StatusCodes, getReasonPhrase } from 'http-status-codes';
 import { groupBy, isNil } from 'lodash-es';
 
+import {
+  ACCOUNT_CREATE_OPERATION,
+  createAccountRequestDigest
+} from './account-idempotency';
 import { CashDetails } from './interfaces/cash-details.interface';
 
 @Injectable()
@@ -217,6 +224,146 @@ export class AccountService {
     return account;
   }
 
+  public async createAccountIdempotently({
+    balance,
+    data,
+    tagIds,
+    userId,
+    idempotencyKey
+  }: {
+    balance?: number;
+    data: Prisma.AccountCreateInput;
+    tagIds?: string[];
+    userId: string;
+    idempotencyKey: string;
+  }): Promise<Account> {
+    const accountFields = data as Prisma.AccountCreateInput & {
+      id?: string | null;
+      name?: string | null;
+      currency?: string | null;
+      comment?: string | null;
+      platformId?: string | null;
+    };
+    const digest = createAccountRequestDigest({
+      id: accountFields.id,
+      name: accountFields.name,
+      currency: accountFields.currency,
+      comment: accountFields.comment,
+      balance,
+      platformId:
+        accountFields.platformId ??
+        ('platform' in data ? data.platform?.connect?.id : undefined),
+      tagIds
+    });
+    const lookup = {
+      userId_operation_key: {
+        userId,
+        operation: ACCOUNT_CREATE_OPERATION,
+        key: idempotencyKey
+      }
+    };
+    const resolveExisting = async (): Promise<Account> => {
+      const result =
+        await this.prismaService.accountCreateIdempotency.findUnique({
+          where: lookup
+        });
+      if (!result)
+        throw new HttpException(
+          getReasonPhrase(StatusCodes.CONFLICT),
+          StatusCodes.CONFLICT
+        );
+      if (result.requestDigest !== digest) {
+        throw new HttpException(
+          getReasonPhrase(StatusCodes.CONFLICT),
+          StatusCodes.CONFLICT
+        );
+      }
+      const original = await this.prismaService.account.findUnique({
+        where: { id_userId: { id: result.resultAccountId, userId } }
+      });
+      if (!original)
+        throw new HttpException(
+          getReasonPhrase(StatusCodes.GONE),
+          StatusCodes.GONE
+        );
+      return original;
+    };
+
+    const existingResult =
+      await this.prismaService.accountCreateIdempotency.findUnique({
+        where: lookup
+      });
+    if (existingResult) {
+      const existingAccount = await resolveExisting();
+      this.emitPortfolioChanged(existingAccount.userId);
+      return existingAccount;
+    }
+
+    let account: Account;
+    try {
+      account = await this.prismaService.$transaction(async (transaction) => {
+        if (tagIds?.includes(TAG_ID_DRAFT)) {
+          throw new HttpException(
+            getReasonPhrase(StatusCodes.BAD_REQUEST),
+            StatusCodes.BAD_REQUEST
+          );
+        }
+        if (tagIds?.length) {
+          const uniqueTagIds = Array.from(new Set(tagIds));
+          const tagsCount = await transaction.tag.count({
+            where: {
+              id: { in: uniqueTagIds },
+              OR: [{ userId }, { userId: null }]
+            }
+          });
+          if (tagsCount !== uniqueTagIds.length) {
+            throw new HttpException(
+              getReasonPhrase(StatusCodes.BAD_REQUEST),
+              StatusCodes.BAD_REQUEST
+            );
+          }
+        }
+        const created = await transaction.account.create({
+          data: {
+            ...data,
+            tags: tagIds
+              ? {
+                  create: tagIds.map((tagId) => ({
+                    tag: { connect: { id: tagId } }
+                  }))
+                }
+              : undefined
+          }
+        });
+        if (!isNil(balance)) {
+          await transaction.accountBalance.create({
+            data: {
+              accountId: created.id,
+              userId,
+              value: balance,
+              date: resetHours(parseISO(format(new Date(), DATE_FORMAT)))
+            }
+          });
+        }
+        await transaction.accountCreateIdempotency.create({
+          data: {
+            userId,
+            operation: ACCOUNT_CREATE_OPERATION,
+            key: idempotencyKey,
+            requestDigest: digest,
+            resultAccountId: created.id
+          }
+        });
+        return created;
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code !== 'P2002') throw error;
+      account = await resolveExisting();
+    }
+    this.emitPortfolioChanged(account.userId);
+    return account;
+  }
+
   public async deleteAccount(
     where: Prisma.AccountWhereUniqueInput
   ): Promise<Account> {
@@ -395,5 +542,12 @@ export class AccountService {
         date: date.toISOString()
       });
     }
+  }
+
+  private emitPortfolioChanged(userId: string): void {
+    this.eventEmitter.emit(
+      PortfolioChangedEvent.getName(),
+      new PortfolioChangedEvent({ userId })
+    );
   }
 }

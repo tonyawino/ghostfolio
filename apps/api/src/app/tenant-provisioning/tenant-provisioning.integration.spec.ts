@@ -227,6 +227,27 @@ integrationDescribe(
         >(`SELECT last_value FROM "${sequenceName}"`);
         expect(Number(sequenceState.last_value)).toBe(2);
 
+        const loginResponse = await fetch(
+          `${TEST_API_URL}/api/v1/auth/anonymous`,
+          {
+            body: JSON.stringify({ accessToken: results[0].accessToken }),
+            headers: { 'content-type': 'application/json' },
+            method: 'POST'
+          }
+        );
+        expect(loginResponse.status).toBe(201);
+        const { authToken } = (await loginResponse.json()) as {
+          authToken: string;
+        };
+        const identityResponse = await fetch(
+          `${TEST_API_URL}/api/v1/user/identity`,
+          { headers: { authorization: `Bearer ${authToken}` } }
+        );
+        expect(identityResponse.status).toBe(200);
+        const identity: unknown = await identityResponse.json();
+        expect(identity).toEqual({ id: results[0].userId, role: Role.USER });
+        expect(Object.keys(identity as object).sort()).toEqual(['id', 'role']);
+
         expect(
           await prisma.tenantUserProvisioning.count({ where: { tenantId } })
         ).toBe(1);
