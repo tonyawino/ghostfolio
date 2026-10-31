@@ -176,6 +176,108 @@ postgresDescribe('activity create idempotency (disposable PostgreSQL)', () => {
     expect(gathering.addJobToQueue).toHaveBeenCalledTimes(2);
   });
 
+  it('waits for an uncommitted same-key winner when sibling provider validation rejects', async () => {
+    const key = randomUUID();
+    const before = await balance();
+    let markStaged: () => void;
+    let releaseWinner: () => void;
+    let markRecoveryAttempted: () => void;
+    const staged = new Promise<void>((resolve) => {
+      markStaged = resolve;
+    });
+    const winnerReleased = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    const recoveryAttempted = new Promise<void>((resolve) => {
+      markRecoveryAttempted = resolve;
+    });
+    const winnerDatabase = new Proxy(prisma, {
+      get(target, property, receiver) {
+        if (property === '$transaction')
+          return (
+            callback: (tx: Prisma.TransactionClient) => Promise<unknown>
+          ) =>
+            prisma.$transaction((tx) =>
+              callback(
+                new Proxy(tx, {
+                  get(t, p, r) {
+                    if (p === 'activityCreateIdempotency')
+                      return {
+                        findUnique:
+                          tx.activityCreateIdempotency.findUnique.bind(
+                            tx.activityCreateIdempotency
+                          ),
+                        create: async (
+                          args: Prisma.ActivityCreateIdempotencyCreateArgs
+                        ) => {
+                          const result =
+                            await tx.activityCreateIdempotency.create(args);
+                          markStaged();
+                          await winnerReleased;
+                          return result;
+                        }
+                      };
+                    return Reflect.get(t, p, r);
+                  }
+                })
+              )
+            );
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    let lookups = 0;
+    const siblingDatabase = new Proxy(prisma, {
+      get(target, property, receiver) {
+        if (property === '$transaction')
+          return (
+            callback: (tx: Prisma.TransactionClient) => Promise<unknown>
+          ) => {
+            markRecoveryAttempted();
+            return prisma.$transaction(callback);
+          };
+        if (property === 'activityCreateIdempotency')
+          return {
+            findUnique: async (
+              args: Prisma.ActivityCreateIdempotencyFindUniqueArgs
+            ) => {
+              const result =
+                await prisma.activityCreateIdempotency.findUnique(args);
+              if (++lookups === 2) markRecoveryAttempted();
+              return result;
+            }
+          };
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    const winner = service(winnerDatabase).createActivityIdempotently(
+      input(),
+      options(key)
+    );
+    await staged;
+    const siblingOutcome = service(siblingDatabase)
+      .createActivityIdempotently(input(), {
+        ...options(key),
+        beforeCreate: async () => {
+          throw new Error('synthetic provider rejection');
+        }
+      })
+      .then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error })
+      );
+    try {
+      await recoveryAttempted;
+    } finally {
+      releaseWinner();
+    }
+    const [created, outcome] = await Promise.all([winner, siblingOutcome]);
+    expect(outcome).toMatchObject({ result: { id: created.id } });
+    expect(
+      await prisma.activityCreateIdempotency.count({ where: { userId, key } })
+    ).toBe(1);
+    expect(await balance()).toBe(before - 7);
+  });
+
   it('serializes balance changes across different keys without losing an increment', async () => {
     const before = await balance();
     await Promise.all([

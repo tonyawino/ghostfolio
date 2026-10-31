@@ -210,13 +210,14 @@ describe('activity create idempotency', () => {
   function newCreateFixture() {
     const fixture = serviceFixture();
     fixture.service.createActivity = jest.fn().mockResolvedValue(activity);
+    const transaction = {
+      ...fixture.prisma,
+      $queryRaw: jest.fn().mockResolvedValue([])
+    };
     fixture.prisma.$transaction.mockImplementation(async (callback) =>
-      callback({
-        ...fixture.prisma,
-        $queryRaw: jest.fn().mockResolvedValue([])
-      })
+      callback(transaction)
     );
-    return fixture;
+    return { ...fixture, transaction };
   }
 
   it('runs provider validation before opening the interactive transaction', async () => {
@@ -258,7 +259,7 @@ describe('activity create idempotency', () => {
   });
 
   it('rechecks a failed validation and returns a concurrent committed winner', async () => {
-    const { service, prisma, effects } = newCreateFixture();
+    const { service, prisma, effects, transaction } = newCreateFixture();
     const beforeCreate = jest.fn(async () => {
       prisma.activityCreateIdempotency.findUnique.mockResolvedValue({
         requestDigest: createActivityRequestDigest(input() as never),
@@ -273,7 +274,11 @@ describe('activity create idempotency', () => {
         beforeCreate
       })
     ).toBe(activity);
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(transaction.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      prisma.activityCreateIdempotency.findUnique.mock.invocationCallOrder[1]
+    );
     expect(service.createActivity).not.toHaveBeenCalled();
     expect(effects.emit).toHaveBeenCalledTimes(2);
   });
@@ -288,7 +293,7 @@ describe('activity create idempotency', () => {
         beforeCreate: jest.fn().mockRejectedValue(error)
       })
     ).rejects.toBe(error);
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(service.createActivity).not.toHaveBeenCalled();
     expect(prisma.activityCreateIdempotency.findUnique).toHaveBeenCalledTimes(
       2
@@ -317,7 +322,7 @@ describe('activity create idempotency', () => {
           beforeCreate
         })
       ).rejects.toMatchObject({ status });
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
       expect(service.createActivity).not.toHaveBeenCalled();
     }
   );
