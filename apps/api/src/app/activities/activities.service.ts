@@ -47,7 +47,12 @@ import {
 } from '@ghostfolio/common/interfaces';
 import { OrderWithAccount } from '@ghostfolio/common/types';
 
-import { Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  GoneException,
+  Injectable,
+  Logger
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   AssetClass,
@@ -62,6 +67,12 @@ import { Big } from 'big.js';
 import { endOfDay, isAfter } from 'date-fns';
 import { groupBy, omit, uniqBy } from 'lodash-es';
 import { randomUUID } from 'node:crypto';
+
+import {
+  ACTIVITY_CREATE_OPERATION,
+  ActivityCreateInput,
+  createActivityRequestDigest
+} from './activity-idempotency';
 
 @Injectable()
 export class ActivitiesService {
@@ -168,18 +179,73 @@ export class ActivitiesService {
     );
   }
 
-  public async createActivity(
-    data: Prisma.OrderCreateInput & {
-      accountId?: string;
-      assetClass?: AssetClass;
-      assetSubClass?: AssetSubClass;
-      currency?: string;
-      symbol?: string;
-      tags?: { id: string }[];
-      updateAccountBalance?: boolean;
-      userId: string;
+  public async createActivityIdempotently(
+    data: ActivityCreateInput,
+    {
+      idempotencyKey,
+      authenticatedUserId,
+      beforeCreate
+    }: {
+      idempotencyKey: string;
+      authenticatedUserId: string;
+      beforeCreate?: () => Promise<void>;
     }
   ): Promise<Prisma.OrderGetPayload<{ include: { SymbolProfile: true } }>> {
+    const requestDigest = createActivityRequestDigest(data);
+    const scope = {
+      userId: authenticatedUserId,
+      operation: ACTIVITY_CREATE_OPERATION,
+      key: idempotencyKey
+    };
+    const where = { userId_operation_key: scope };
+    const resolveResult = async (
+      result: { requestDigest: string; resultOrderId: string },
+      database: Prisma.TransactionClient = this.prismaService
+    ) => {
+      if (result.requestDigest !== requestDigest) throw new ConflictException();
+      const original = await database.order.findUnique({
+        where: { id: result.resultOrderId, userId: data.userId },
+        include: { SymbolProfile: true }
+      });
+      if (!original) throw new GoneException();
+      return original;
+    };
+
+    const existing =
+      await this.prismaService.activityCreateIdempotency.findUnique({ where });
+    let activity: Prisma.OrderGetPayload<{ include: { SymbolProfile: true } }>;
+    if (existing) {
+      activity = await resolveResult(existing);
+    } else {
+      activity = await this.prismaService.$transaction(async (transaction) => {
+        // Serialize this exact actor/operation/key, including the lookup before
+        // mutable quotas. Hash collisions only serialize unrelated requests.
+        await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(scope)}, 0))::text`;
+        const winner = await transaction.activityCreateIdempotency.findUnique({
+          where
+        });
+        if (winner) return resolveResult(winner, transaction);
+        await beforeCreate?.();
+        const created = await this.createActivity(
+          structuredClone(data),
+          transaction
+        );
+        // No FK to Order: deletion must leave a permanent result tombstone.
+        await transaction.activityCreateIdempotency.create({
+          data: { ...scope, requestDigest, resultOrderId: created.id }
+        });
+        return created;
+      });
+    }
+    await this.publishActivityCreated(activity);
+    return activity;
+  }
+
+  public async createActivity(
+    data: ActivityCreateInput,
+    transaction?: Prisma.TransactionClient
+  ): Promise<Prisma.OrderGetPayload<{ include: { SymbolProfile: true } }>> {
+    const database = transaction ?? this.prismaService;
     const tags = data.tags ?? [];
 
     await this.tagService.validateTagIds({
@@ -222,7 +288,7 @@ export class ActivitiesService {
       let symbol: string;
 
       const existingAssetProfile = hasGhostfolioPrefix(requestedSymbol)
-        ? await this.prismaService.symbolProfile.findUnique({
+        ? await database.symbolProfile.findUnique({
             select: { id: true },
             where: {
               dataSource_symbol: { dataSource, symbol: requestedSymbol }
@@ -256,24 +322,6 @@ export class ActivitiesService {
       };
     }
 
-    if (data.SymbolProfile.connectOrCreate.create.dataSource !== 'MANUAL') {
-      this.dataGatheringService.addJobToQueue({
-        data: {
-          dataSource: data.SymbolProfile.connectOrCreate.create.dataSource,
-          symbol: data.SymbolProfile.connectOrCreate.create.symbol
-        },
-        name: GATHER_ASSET_PROFILE_PROCESS_JOB_NAME,
-        opts: {
-          ...GATHER_ASSET_PROFILE_PROCESS_JOB_OPTIONS,
-          jobId: getAssetProfileIdentifier({
-            dataSource: data.SymbolProfile.connectOrCreate.create.dataSource,
-            symbol: data.SymbolProfile.connectOrCreate.create.symbol
-          }),
-          priority: DATA_GATHERING_QUEUE_PRIORITY_HIGH
-        }
-      });
-    }
-
     delete data.accountId;
     delete data.assetClass;
     delete data.assetSubClass;
@@ -296,7 +344,7 @@ export class ActivitiesService {
       type: data.type
     });
 
-    const activity = await this.prismaService.order.create({
+    const activity = await database.order.create({
       data: {
         ...orderData,
         account,
@@ -316,31 +364,19 @@ export class ActivitiesService {
 
       amount = amount.minus(data.fee);
 
-      await this.accountService.updateAccountBalance({
-        accountId,
-        userId,
-        amount: amount.toNumber(),
-        currency: activity.currency ?? activity.SymbolProfile.currency,
-        date: data.date as Date
-      });
+      await this.accountService.updateAccountBalance(
+        {
+          accountId,
+          userId,
+          amount: amount.toNumber(),
+          currency: activity.currency ?? activity.SymbolProfile.currency,
+          date: data.date as Date
+        },
+        transaction
+      );
     }
 
-    this.eventEmitter.emit(
-      AssetProfileChangedEvent.getName(),
-      new AssetProfileChangedEvent({
-        currency: activity.SymbolProfile.currency,
-        dataSource: activity.SymbolProfile.dataSource,
-        symbol: activity.SymbolProfile.symbol
-      })
-    );
-
-    this.eventEmitter.emit(
-      PortfolioChangedEvent.getName(),
-      new PortfolioChangedEvent({
-        userId: activity.userId
-      })
-    );
-
+    if (!transaction) await this.publishActivityCreated(activity, false);
     return activity;
   }
 
@@ -1014,6 +1050,50 @@ export class ActivitiesService {
     );
 
     return activity;
+  }
+
+  private async publishActivityCreated(
+    activity: Prisma.OrderGetPayload<{ include: { SymbolProfile: true } }>,
+    waitForGathering = true
+  ): Promise<void> {
+    if (activity.SymbolProfile.dataSource !== 'MANUAL') {
+      const gathering = this.dataGatheringService.addJobToQueue({
+        data: {
+          dataSource: activity.SymbolProfile.dataSource,
+          symbol: activity.SymbolProfile.symbol
+        },
+        name: GATHER_ASSET_PROFILE_PROCESS_JOB_NAME,
+        opts: {
+          ...GATHER_ASSET_PROFILE_PROCESS_JOB_OPTIONS,
+          jobId: getAssetProfileIdentifier(activity.SymbolProfile),
+          priority: DATA_GATHERING_QUEUE_PRIORITY_HIGH
+        }
+      });
+      if (waitForGathering) await gathering;
+      else {
+        // Legacy clients have no retry key. A background queue failure must
+        // not turn an already committed create into an error response.
+        void gathering.catch((error) => {
+          Logger.error(
+            'Activity background gathering failed',
+            error,
+            ActivitiesService.name
+          );
+        });
+      }
+    }
+    this.eventEmitter.emit(
+      AssetProfileChangedEvent.getName(),
+      new AssetProfileChangedEvent({
+        currency: activity.SymbolProfile.currency,
+        dataSource: activity.SymbolProfile.dataSource,
+        symbol: activity.SymbolProfile.symbol
+      })
+    );
+    this.eventEmitter.emit(
+      PortfolioChangedEvent.getName(),
+      new PortfolioChangedEvent({ userId: activity.userId })
+    );
   }
 
   private getWhereClause({
