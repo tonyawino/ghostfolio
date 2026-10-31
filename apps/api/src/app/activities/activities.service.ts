@@ -217,15 +217,30 @@ export class ActivitiesService {
     if (existing) {
       activity = await resolveResult(existing);
     } else {
+      // Provider validation can make network calls. Keep it outside Prisma's
+      // interactive transaction, whose timeout must cover only DB creation.
+      try {
+        await beforeCreate?.();
+      } catch (error) {
+        // Another request may have committed while this validation failed.
+        // Preserve replay semantics before returning a mutable provider error.
+        const winner =
+          await this.prismaService.activityCreateIdempotency.findUnique({
+            where
+          });
+        if (!winner) throw error;
+        const replay = await resolveResult(winner);
+        await this.publishActivityCreated(replay);
+        return replay;
+      }
       activity = await this.prismaService.$transaction(async (transaction) => {
-        // Serialize this exact actor/operation/key, including the lookup before
-        // mutable quotas. Hash collisions only serialize unrelated requests.
+        // Serialize this exact actor/operation/key and recheck after validation.
+        // Hash collisions only serialize unrelated requests.
         await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(scope)}, 0))::text`;
         const winner = await transaction.activityCreateIdempotency.findUnique({
           where
         });
         if (winner) return resolveResult(winner, transaction);
-        await beforeCreate?.();
         const created = await this.createActivity(
           structuredClone(data),
           transaction

@@ -126,7 +126,14 @@ postgresDescribe('activity create idempotency (disposable PostgreSQL)', () => {
   it('converges concurrent duplicate creates to one Order, result and balance effect', async () => {
     const key = randomUUID();
     const before = await balance();
-    const firstValidation = jest.fn().mockResolvedValue(undefined);
+    let releaseValidation: () => void;
+    const validationsReady = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const firstValidation = jest.fn(async () => {
+      if (firstValidation.mock.calls.length === 4) releaseValidation();
+      await validationsReady;
+    });
     const s = service();
     const results = await Promise.all(
       Array.from({ length: 4 }, () =>
@@ -142,8 +149,31 @@ postgresDescribe('activity create idempotency (disposable PostgreSQL)', () => {
       await prisma.activityCreateIdempotency.count({ where: { userId, key } })
     ).toBe(1);
     expect(await balance()).toBe(before - 7);
-    expect(firstValidation).toHaveBeenCalledTimes(1);
+    expect(firstValidation).toHaveBeenCalledTimes(4);
     expect(gathering.addJobToQueue).toHaveBeenCalledTimes(4);
+  });
+
+  it('returns a concurrent committed winner when provider validation fails outside the transaction', async () => {
+    const key = randomUUID();
+    const before = await balance();
+    let winnerId: string;
+    const replay = await service().createActivityIdempotently(input(), {
+      ...options(key),
+      beforeCreate: async () => {
+        const winner = await service().createActivityIdempotently(
+          input(),
+          options(key)
+        );
+        winnerId = winner.id;
+        throw new Error('synthetic quota change during provider validation');
+      }
+    });
+    expect(replay.id).toBe(winnerId);
+    expect(
+      await prisma.activityCreateIdempotency.count({ where: { userId, key } })
+    ).toBe(1);
+    expect(await balance()).toBe(before - 7);
+    expect(gathering.addJobToQueue).toHaveBeenCalledTimes(2);
   });
 
   it('serializes balance changes across different keys without losing an increment', async () => {

@@ -64,7 +64,8 @@ function controllerFixture() {
 function serviceFixture(result: unknown = null, original: unknown = activity) {
   const prisma = {
     activityCreateIdempotency: {
-      findUnique: jest.fn().mockResolvedValue(result)
+      findUnique: jest.fn().mockResolvedValue(result),
+      create: jest.fn().mockResolvedValue(undefined)
     },
     order: {
       findUnique: jest.fn().mockResolvedValue(original),
@@ -205,6 +206,121 @@ describe('activity create idempotency', () => {
       })
     );
   });
+
+  function newCreateFixture() {
+    const fixture = serviceFixture();
+    fixture.service.createActivity = jest.fn().mockResolvedValue(activity);
+    fixture.prisma.$transaction.mockImplementation(async (callback) =>
+      callback({
+        ...fixture.prisma,
+        $queryRaw: jest.fn().mockResolvedValue([])
+      })
+    );
+    return fixture;
+  }
+
+  it('runs provider validation before opening the interactive transaction', async () => {
+    const { service, prisma } = newCreateFixture();
+    const beforeCreate = jest.fn(async () => {
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+    expect(
+      await service.createActivityIdempotently(input(), {
+        idempotencyKey: KEY,
+        authenticatedUserId: ACTOR,
+        beforeCreate
+      })
+    ).toBe(activity);
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.activityCreateIdempotency.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks the locked key after provider validation and replays a concurrent winner', async () => {
+    const { service, prisma } = newCreateFixture();
+    const beforeCreate = jest.fn(async () => {
+      prisma.activityCreateIdempotency.findUnique.mockResolvedValue({
+        requestDigest: createActivityRequestDigest(input() as never),
+        resultOrderId: activity.id
+      });
+    });
+    expect(
+      await service.createActivityIdempotently(input(), {
+        idempotencyKey: KEY,
+        authenticatedUserId: ACTOR,
+        beforeCreate
+      })
+    ).toBe(activity);
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(service.createActivity).not.toHaveBeenCalled();
+    expect(prisma.activityCreateIdempotency.create).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a failed validation and returns a concurrent committed winner', async () => {
+    const { service, prisma, effects } = newCreateFixture();
+    const beforeCreate = jest.fn(async () => {
+      prisma.activityCreateIdempotency.findUnique.mockResolvedValue({
+        requestDigest: createActivityRequestDigest(input() as never),
+        resultOrderId: activity.id
+      });
+      throw new Error('quota changed during validation');
+    });
+    expect(
+      await service.createActivityIdempotently(input(), {
+        idempotencyKey: KEY,
+        authenticatedUserId: ACTOR,
+        beforeCreate
+      })
+    ).toBe(activity);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(service.createActivity).not.toHaveBeenCalled();
+    expect(effects.emit).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the validation error when no concurrent result exists', async () => {
+    const { service, prisma } = newCreateFixture();
+    const error = new Error('provider validation failed');
+    await expect(
+      service.createActivityIdempotently(input(), {
+        idempotencyKey: KEY,
+        authenticatedUserId: ACTOR,
+        beforeCreate: jest.fn().mockRejectedValue(error)
+      })
+    ).rejects.toBe(error);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(service.createActivity).not.toHaveBeenCalled();
+    expect(prisma.activityCreateIdempotency.findUnique).toHaveBeenCalledTimes(
+      2
+    );
+  });
+
+  it.each([409, 410])(
+    'keeps concurrent result semantics after validation failure (%s)',
+    async (status) => {
+      const { service, prisma } = newCreateFixture();
+      const beforeCreate = jest.fn(async () => {
+        prisma.activityCreateIdempotency.findUnique.mockResolvedValue({
+          requestDigest:
+            status === 409
+              ? 'different-request'
+              : createActivityRequestDigest(input() as never),
+          resultOrderId: activity.id
+        });
+        if (status === 410) prisma.order.findUnique.mockResolvedValue(null);
+        throw new Error('provider validation failed');
+      });
+      await expect(
+        service.createActivityIdempotently(input(), {
+          idempotencyKey: KEY,
+          authenticatedUserId: ACTOR,
+          beforeCreate
+        })
+      ).rejects.toMatchObject({ status });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(service.createActivity).not.toHaveBeenCalled();
+    }
+  );
 
   it('rejects a changed request with 409', async () => {
     const { service, prisma } = serviceFixture({
