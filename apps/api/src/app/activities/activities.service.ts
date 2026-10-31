@@ -222,14 +222,17 @@ export class ActivitiesService {
       try {
         await beforeCreate?.();
       } catch (error) {
-        // Another request may have committed while this validation failed.
-        // Preserve replay semantics before returning a mutable provider error.
-        const winner =
-          await this.prismaService.activityCreateIdempotency.findUnique({
-            where
-          });
-        if (!winner) throw error;
-        const replay = await resolveResult(winner);
+        // A same-key create may still be uncommitted. Wait on its key lock
+        // before deciding whether this validation error is a definite failure.
+        const replay = await this.prismaService.$transaction(
+          async (transaction) => {
+            await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(scope)}, 0))::text`;
+            const winner =
+              await transaction.activityCreateIdempotency.findUnique({ where });
+            if (!winner) throw error;
+            return resolveResult(winner, transaction);
+          }
+        );
         await this.publishActivityCreated(replay);
         return replay;
       }
