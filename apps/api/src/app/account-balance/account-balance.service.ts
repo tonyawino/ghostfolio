@@ -43,15 +43,20 @@ export class AccountBalanceService {
     });
   }
 
-  public async createOrUpdateAccountBalance({
-    accountId,
-    balance,
-    date,
-    userId
-  }: CreateAccountBalanceDto & {
-    userId: string;
-  }): Promise<AccountBalance> {
-    const accountBalance = await this.prismaService.accountBalance.upsert({
+  public async createOrUpdateAccountBalance(
+    {
+      accountId,
+      balance,
+      date,
+      userId
+    }: CreateAccountBalanceDto & {
+      userId: string;
+    },
+    transaction?: Prisma.TransactionClient
+  ): Promise<AccountBalance> {
+    const accountBalance = await (
+      transaction ?? this.prismaService
+    ).accountBalance.upsert({
       create: {
         account: {
           connect: {
@@ -76,12 +81,13 @@ export class AccountBalanceService {
       }
     });
 
-    this.eventEmitter.emit(
-      PortfolioChangedEvent.getName(),
-      new PortfolioChangedEvent({
-        userId
-      })
-    );
+    if (!transaction)
+      this.eventEmitter.emit(
+        PortfolioChangedEvent.getName(),
+        new PortfolioChangedEvent({
+          userId
+        })
+      );
 
     return accountBalance;
   }

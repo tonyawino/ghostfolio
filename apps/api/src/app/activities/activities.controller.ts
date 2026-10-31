@@ -1,3 +1,4 @@
+import { parseIdempotencyKey } from '@ghostfolio/api/app/account/account-idempotency';
 import { HasPermission } from '@ghostfolio/api/decorators/has-permission.decorator';
 import { Impersonation } from '@ghostfolio/api/decorators/impersonation.decorator';
 import { RequiresScope } from '@ghostfolio/api/decorators/requires-scope.decorator';
@@ -21,18 +22,24 @@ import {
 } from '@ghostfolio/common/interfaces';
 import { permissions } from '@ghostfolio/common/permissions';
 import { scopes } from '@ghostfolio/common/scopes';
-import type { ImpersonationContext } from '@ghostfolio/common/types';
+import type {
+  ImpersonationContext,
+  RequestWithUser
+} from '@ghostfolio/common/types';
 
 import {
   Body,
   Controller,
   Delete,
   Get,
+  Headers,
   HttpException,
+  Logger,
   Param,
   Post,
   Put,
   Query,
+  Request,
   UseInterceptors
 } from '@nestjs/common';
 import { Order } from '@prisma/client';
@@ -221,8 +228,11 @@ export class ActivitiesController {
       authenticatedUserSubscription,
       userId,
       userSubscription
-    }: ImpersonationContext
+    }: ImpersonationContext,
+    @Headers('Idempotency-Key') idempotencyKeyHeader?: string | string[],
+    @Request() request?: RequestWithUser
   ): Promise<CreateActivityResponse> {
+    const idempotencyKey = parseIdempotencyKey(idempotencyKeyHeader);
     // Evaluate the more restrictive subscription of the authenticated user
     // and the owner of the activity
     const subscription =
@@ -230,43 +240,37 @@ export class ActivitiesController {
         ? userSubscription
         : authenticatedUserSubscription;
 
-    try {
-      await this.dataProviderService.validateActivities({
-        subscription,
-        activitiesDto: [
+    const validateNewActivity = async () => {
+      try {
+        await this.dataProviderService.validateActivities({
+          subscription,
+          activitiesDto: [
+            {
+              currency: data.currency,
+              dataSource: data.dataSource,
+              symbol: data.symbol,
+              type: data.type
+            }
+          ],
+          maxActivitiesToImport: 1
+        });
+      } catch (error) {
+        throw new HttpException(
           {
-            currency: data.currency,
-            dataSource: data.dataSource,
-            symbol: data.symbol,
-            type: data.type
-          }
-        ],
-        maxActivitiesToImport: 1
-      });
-    } catch (error) {
-      throw new HttpException(
-        {
-          error: getReasonPhrase(StatusCodes.BAD_REQUEST),
-          message: [error.message]
-        },
-        StatusCodes.BAD_REQUEST
-      );
-    }
+            error: getReasonPhrase(StatusCodes.BAD_REQUEST),
+            message: [error.message]
+          },
+          StatusCodes.BAD_REQUEST
+        );
+      }
+    };
 
+    const { dataSource, customCurrency, ...orderData } = data;
     const currency = data.currency;
-    const customCurrency = data.customCurrency;
-    const dataSource = data.dataSource;
+    if (customCurrency) orderData.currency = customCurrency;
 
-    if (customCurrency) {
-      data.currency = customCurrency;
-
-      delete data.customCurrency;
-    }
-
-    delete data.dataSource;
-
-    const activity = await this.activitiesService.createActivity({
-      ...data,
+    const activityData = {
+      ...orderData,
       userId,
       date: parseISO(data.date),
       SymbolProfile: {
@@ -288,7 +292,15 @@ export class ActivitiesController {
         return { id };
       }),
       user: { connect: { id: userId } }
-    });
+    };
+    if (!idempotencyKey) await validateNewActivity();
+    const activity = idempotencyKey
+      ? await this.activitiesService.createActivityIdempotently(activityData, {
+          idempotencyKey,
+          authenticatedUserId: request.user.id,
+          beforeCreate: validateNewActivity
+        })
+      : await this.activitiesService.createActivity(activityData);
 
     if (
       isDataGatheringSupported(activity.SymbolProfile) &&
@@ -296,7 +308,7 @@ export class ActivitiesController {
     ) {
       // Gather symbol data in the background, if the asset profile supports
       // data gathering and the date is not in the future
-      this.dataGatheringService.gatherSymbols({
+      const gathering = this.dataGatheringService.gatherSymbols({
         dataGatheringItems: [
           {
             dataSource: activity.SymbolProfile.dataSource,
@@ -306,6 +318,16 @@ export class ActivitiesController {
         ],
         priority: DATA_GATHERING_QUEUE_PRIORITY_HIGH
       });
+      if (idempotencyKey) await gathering;
+      else {
+        void gathering.catch((error) => {
+          Logger.error(
+            'Activity background gathering failed',
+            error,
+            ActivitiesController.name
+          );
+        });
+      }
     }
 
     const [assetProfile] = await this.symbolProfileService.getSymbolProfiles([
