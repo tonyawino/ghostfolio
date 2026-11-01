@@ -48,6 +48,24 @@ export class AssetProfilesService {
     private readonly symbolProfileService: SymbolProfileService
   ) {}
 
+  public async getProfileIdentity({
+    dataSource,
+    symbol
+  }: {
+    dataSource: DataSource;
+    symbol: string;
+  }): Promise<{
+    id: string;
+    dataSource: DataSource;
+    symbol: string;
+    userId: string | null;
+  } | null> {
+    return this.prismaService.symbolProfile.findUnique({
+      select: { id: true, dataSource: true, symbol: true, userId: true },
+      where: { dataSource_symbol: { dataSource, symbol } }
+    });
+  }
+
   public async createSplit({
     dataSource,
     date,

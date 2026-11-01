@@ -16,6 +16,7 @@ describe('AssetProfilesService', () => {
   let finished: jest.Mock;
   let gatherSymbol: jest.Mock;
   let getUserIdsBySymbolProfileId: jest.Mock;
+  let getSymbolProfile: jest.Mock;
   let upsert: jest.Mock;
 
   beforeEach(() => {
@@ -24,6 +25,7 @@ describe('AssetProfilesService', () => {
     finished = jest.fn().mockResolvedValue(undefined);
     gatherSymbol = jest.fn().mockResolvedValue([{ finished }]);
     getUserIdsBySymbolProfileId = jest.fn().mockResolvedValue([]);
+    getSymbolProfile = jest.fn();
     upsert = jest.fn();
 
     assetProfilesService = new AssetProfilesService(
@@ -38,9 +40,34 @@ describe('AssetProfilesService', () => {
       { emit } as unknown as EventEmitter2,
       null,
       null,
-      null,
+      { symbolProfile: { findUnique: getSymbolProfile } } as any,
       null
     );
+  });
+
+  describe('getProfileIdentity', () => {
+    it('selects only the identity fields needed by Hub', async () => {
+      const identity = {
+        id: 'profile-id',
+        dataSource: DataSource.MANUAL,
+        symbol: 'SYNTH',
+        userId: null
+      };
+      getSymbolProfile.mockResolvedValue(identity);
+
+      await expect(
+        assetProfilesService.getProfileIdentity({
+          dataSource: DataSource.MANUAL,
+          symbol: 'SYNTH'
+        })
+      ).resolves.toEqual(identity);
+      expect(getSymbolProfile).toHaveBeenCalledWith({
+        select: { id: true, dataSource: true, symbol: true, userId: true },
+        where: {
+          dataSource_symbol: { dataSource: DataSource.MANUAL, symbol: 'SYNTH' }
+        }
+      });
+    });
   });
 
   describe('createSplit', () => {

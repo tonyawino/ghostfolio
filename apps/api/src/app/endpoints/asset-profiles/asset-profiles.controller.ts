@@ -130,6 +130,40 @@ export class AssetProfilesController {
     });
   }
 
+  @Get(':dataSource/:symbol/identity')
+  @UseGuards(AuthGuard('jwt'))
+  @UseInterceptors(TransformDataSourceInRequestInterceptor)
+  public async getAssetProfileIdentity(
+    @Param('dataSource') dataSource: DataSource,
+    @Param('symbol') symbol: string
+  ): Promise<{
+    assetProfile: { id: string; symbol: string; userId: string | null };
+  }> {
+    const profile = await this.assetProfilesService.getProfileIdentity({
+      dataSource,
+      symbol
+    });
+
+    if (
+      dataSource !== DataSource.MANUAL ||
+      profile?.dataSource !== DataSource.MANUAL ||
+      (profile.userId !== null && profile.userId !== this.request.user.id)
+    ) {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.NOT_FOUND),
+        StatusCodes.NOT_FOUND
+      );
+    }
+
+    return {
+      assetProfile: {
+        id: profile.id,
+        symbol: profile.symbol,
+        userId: profile.userId
+      }
+    };
+  }
+
   @Post(':dataSource/:symbol/splits')
   @UseGuards(AuthGuard('jwt'))
   @UseInterceptors(TransformDataSourceInRequestInterceptor)
