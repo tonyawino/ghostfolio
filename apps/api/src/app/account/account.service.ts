@@ -49,10 +49,13 @@ export class AccountService {
     private readonly tagService: TagService
   ) {}
 
-  public async account({
-    id_userId
-  }: Prisma.AccountWhereUniqueInput): Promise<AccountWithBalance | null> {
-    const account = await this.prismaService.account.findUnique({
+  public async account(
+    { id_userId }: Prisma.AccountWhereUniqueInput,
+    transaction?: Prisma.TransactionClient
+  ): Promise<AccountWithBalance | null> {
+    const account = await (
+      transaction ?? this.prismaService
+    ).account.findUnique({
       include: {
         balances: {
           orderBy: { date: 'desc' },
@@ -506,25 +509,35 @@ export class AccountService {
     return account;
   }
 
-  public async updateAccountBalance({
-    accountId,
-    amount,
-    currency,
-    date = new Date(),
-    userId
-  }: {
-    accountId: string;
-    amount: number;
-    currency: string;
-    date?: Date;
-    userId: string;
-  }) {
-    const { balance, currency: currencyOfAccount } = await this.account({
-      id_userId: {
-        userId,
-        id: accountId
-      }
-    });
+  public async updateAccountBalance(
+    {
+      accountId,
+      amount,
+      currency,
+      date = new Date(),
+      userId
+    }: {
+      accountId: string;
+      amount: number;
+      currency: string;
+      date?: Date;
+      userId: string;
+    },
+    transaction?: Prisma.TransactionClient
+  ) {
+    if (transaction) {
+      // Different keys updating the same balance must not lose an increment.
+      await transaction.$queryRaw`SELECT "id" FROM "Account" WHERE "id" = ${accountId} AND "userId" = ${userId} FOR NO KEY UPDATE`;
+    }
+    const { balance, currency: currencyOfAccount } = await this.account(
+      {
+        id_userId: {
+          userId,
+          id: accountId
+        }
+      },
+      transaction
+    );
 
     const amountInCurrencyOfAccount =
       await this.exchangeRateDataService.toCurrencyAtDate(
@@ -534,13 +547,20 @@ export class AccountService {
         date
       );
 
+    if (transaction && !Number.isFinite(amountInCurrencyOfAccount)) {
+      throw new Error('Unable to convert account balance amount');
+    }
+
     if (amountInCurrencyOfAccount) {
-      await this.accountBalanceService.createOrUpdateAccountBalance({
-        accountId,
-        userId,
-        balance: new Big(balance).plus(amountInCurrencyOfAccount).toNumber(),
-        date: date.toISOString()
-      });
+      await this.accountBalanceService.createOrUpdateAccountBalance(
+        {
+          accountId,
+          userId,
+          balance: new Big(balance).plus(amountInCurrencyOfAccount).toNumber(),
+          date: date.toISOString()
+        },
+        transaction
+      );
     }
   }
 

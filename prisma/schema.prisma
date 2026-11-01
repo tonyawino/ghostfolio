@@ -82,6 +82,19 @@ model AccountCreateIdempotency {
   @@index([userId])
 }
 
+// Intentionally no Order FK: deleting an activity retains the key tombstone.
+model ActivityCreateIdempotency {
+  userId        String
+  operation     String
+  key           String
+  requestDigest String
+  resultOrderId String
+  createdAt     DateTime @default(now())
+
+  @@id([userId, operation, key])
+  @@index([userId])
+}
+
 model Analytics {
   activityCount                       Int            @default(0)
   country                             String?

@@ -1,3 +1,4 @@
+import { ACTIVITY_CREATE_IDEMPOTENCY_CAPABILITY } from '@ghostfolio/api/app/activities/activity-idempotency';
 import { RedisCacheService } from '@ghostfolio/api/app/redis-cache/redis-cache.service';
 import { SubscriptionService } from '@ghostfolio/api/app/subscription/subscription.service';
 import { UserService } from '@ghostfolio/api/app/user/user.service';
@@ -131,6 +132,7 @@ export class InfoService {
       isReadOnlyMode,
       statistics,
       subscriptionOffer,
+      capabilities: [ACTIVITY_CREATE_IDEMPOTENCY_CAPABILITY],
       baseCurrency: DEFAULT_CURRENCY,
       currencies: this.exchangeRateDataService.getCurrencies(),
       fearAndGreedStocksMarketPrice:

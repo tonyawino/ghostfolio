@@ -1033,6 +1033,15 @@ describe('ActivitiesService', () => {
       expect(update).not.toHaveBeenCalled();
     });
 
+    it('does not allow an update payload to change the activity ID', async () => {
+      const data = await getUpdatedActivityData({
+        activityId: 'replacement-id',
+        userId: 'user-id'
+      });
+
+      expect(data).not.toHaveProperty('id');
+    });
+
     it('updates the custom asset profile of the user', async () => {
       const data = await getUpdatedActivityData({ userId: 'user-id' });
 
@@ -1073,6 +1082,7 @@ describe('ActivitiesService', () => {
       assetProfileId,
       assetProfileName,
       comment,
+      activityId,
       dataSource = DataSource.MANUAL,
       expectedAssetProfileId,
       preserveComment,
@@ -1091,6 +1101,7 @@ describe('ActivitiesService', () => {
       assetProfileId?: string;
       assetProfileName?: string;
       comment?: string;
+      activityId?: string;
       dataSource?: DataSource;
       expectedAssetProfileId?: string;
       preserveComment?: boolean;
@@ -1191,6 +1202,7 @@ describe('ActivitiesService', () => {
         preserveComment,
         data: {
           ...(comment !== undefined ? { comment } : {}),
+          id: activityId,
           type,
           assetClass: AssetClass.COMMODITY,
           assetSubClass: AssetSubClass.PRECIOUS_METAL,
