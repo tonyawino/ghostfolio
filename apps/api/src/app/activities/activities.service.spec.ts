@@ -584,6 +584,15 @@ describe('ActivitiesService', () => {
   });
 
   describe('updateActivity', () => {
+    it('does not allow an update payload to change the activity ID', async () => {
+      const data = await getUpdatedActivityData({
+        activityId: 'replacement-id',
+        userId: 'user-id'
+      });
+
+      expect(data).not.toHaveProperty('id');
+    });
+
     it('updates the custom asset profile of the user', async () => {
       const data = await getUpdatedActivityData({ userId: 'user-id' });
 
@@ -619,11 +628,13 @@ describe('ActivitiesService', () => {
     });
 
     async function getUpdatedActivityData({
+      activityId,
       dataSource = DataSource.MANUAL,
       symbol = 'GF_GOLD',
       type = ActivityType.BUY,
       userId
     }: {
+      activityId?: string;
       dataSource?: DataSource;
       symbol?: string;
       type?: ActivityType;
@@ -655,6 +666,7 @@ describe('ActivitiesService', () => {
 
       await service.updateActivity({
         data: {
+          id: activityId,
           type,
           assetClass: AssetClass.COMMODITY,
           assetSubClass: AssetSubClass.PRECIOUS_METAL,
