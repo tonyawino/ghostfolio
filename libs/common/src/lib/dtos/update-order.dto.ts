@@ -23,6 +23,7 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  IsUUID,
   Min,
   Validate,
   ValidateIf
@@ -50,6 +51,10 @@ export class UpdateOrderDto {
     isString(value) ? value.trim() : value
   )
   assetProfileName?: string;
+
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsUUID()
+  assetProfileId?: string;
 
   @IsOptional()
   @IsString()

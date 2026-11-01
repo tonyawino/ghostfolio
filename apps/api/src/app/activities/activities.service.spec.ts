@@ -586,6 +586,134 @@ describe('ActivitiesService', () => {
   });
 
   describe('updateActivity', () => {
+    it('locks and revalidates the SELL and destination profile in the update transaction', async () => {
+      const assetProfileId = 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a';
+      const lockQueries: string[] = [];
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+      const queryRaw = jest.fn((strings: TemplateStringsArray) => {
+        lockQueries.push(strings.join(' '));
+        return Promise.resolve(
+          lockQueries.length === 1
+            ? [{
+                id: 'activity-id',
+                userId: 'user-id',
+                type: ActivityType.SELL,
+                symbolProfileId: 'profile-id'
+              }]
+            : [
+                {
+                  id: 'profile-id',
+                  dataSource: DataSource.MANUAL,
+                  symbol: 'OLDCO',
+                  userId: 'user-id'
+                },
+                {
+                  id: assetProfileId,
+                  dataSource: DataSource.MANUAL,
+                  symbol: 'NEWCO',
+                  userId: null
+                }
+              ]
+        );
+      });
+      const transaction = jest.fn(
+        async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+          callback({
+            $queryRaw: queryRaw as unknown as Prisma.TransactionClient['$queryRaw'],
+            order: { update }
+          } as unknown as Prisma.TransactionClient)
+      );
+
+      await getUpdatedActivityData({
+        activityType: ActivityType.SELL,
+        assetProfileId,
+        symbol: 'NEWCO',
+        transaction,
+        type: ActivityType.SELL,
+        update,
+        userId: 'user-id'
+      });
+
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(lockQueries).toHaveLength(2);
+      expect(lockQueries.every((query) => query.includes('FOR UPDATE'))).toBe(true);
+      expect(lockQueries[1]).toContain('ORDER BY "id"');
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'activity-id',
+            userId: 'user-id',
+            type: ActivityType.SELL,
+            symbolProfileId: 'profile-id'
+          })
+        })
+      );
+    });
+
+    it('connects a SELL activity to the exact existing shared MANUAL profile', async () => {
+      const data = await getUpdatedActivityData({
+        activityType: ActivityType.SELL,
+        assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+        profileOwner: null,
+        symbol: 'NEWCO',
+        type: ActivityType.SELL,
+        userId: 'user-id'
+      });
+
+      expect(data.SymbolProfile).toEqual({
+        connect: { id: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a' }
+      });
+    });
+
+    it('connects a SELL activity to an exact same-user MANUAL profile', async () => {
+      const data = await getUpdatedActivityData({
+        activityType: ActivityType.SELL,
+        assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+        profileOwner: 'user-id',
+        symbol: 'NEWCO',
+        type: ActivityType.SELL,
+        userId: 'user-id'
+      });
+
+      expect(data.SymbolProfile).toEqual({
+        connect: { id: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a' }
+      });
+    });
+
+    it('rejects a missing SELL target profile before updating the activity', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+
+      await expect(
+        getUpdatedActivityData({
+          activityType: ActivityType.SELL,
+          assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+          profileExists: false,
+          symbol: 'NEWCO',
+          type: ActivityType.SELL,
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(BadRequestException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a SELL target profile owned by another user before updating the activity', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+
+      await expect(
+        getUpdatedActivityData({
+          activityType: ActivityType.SELL,
+          assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+          profileOwner: 'foreign-user-id',
+          symbol: 'NEWCO',
+          type: ActivityType.SELL,
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(ForbiddenException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
     it.each([ActivityType.BUY, ActivityType.SELL])(
       'updates an explicitly named manual %s profile without changing its key',
       async (type) => {
@@ -763,28 +891,66 @@ describe('ActivitiesService', () => {
     async function getUpdatedActivityData({
       activityOwner = 'user-id',
       activityType = ActivityType.BUY,
+      assetProfileId,
       assetProfileName,
       comment,
       dataSource = DataSource.MANUAL,
       preserveComment,
       profileDataSource = DataSource.MANUAL,
+      profileOwner = 'user-id',
+      profileExists = true,
       symbol = 'GF_GOLD',
       type = ActivityType.BUY,
+      transaction,
       update = jest.fn().mockResolvedValue({ userId: 'user-id' }),
       userId
     }: {
       activityOwner?: string;
       activityType?: ActivityType;
+      assetProfileId?: string;
       assetProfileName?: string;
       comment?: string;
       dataSource?: DataSource;
       preserveComment?: boolean;
       profileDataSource?: DataSource;
+      profileExists?: boolean;
+      profileOwner?: string | null;
       symbol?: string;
       type?: ActivityType;
+      transaction?: jest.Mock;
       update?: jest.Mock;
       userId: string | null;
     }) {
+      const prismaTransaction =
+        transaction ??
+        jest.fn(
+          async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+            callback({
+              $queryRaw: jest
+                .fn()
+                .mockResolvedValueOnce([{
+                  id: 'activity-id',
+                  userId: 'user-id',
+                  type: activityType,
+                  symbolProfileId: 'profile-id'
+                }])
+                .mockResolvedValueOnce([
+                  {
+                    id: 'profile-id',
+                    dataSource: profileDataSource,
+                    symbol: 'OLD_SYMBOL',
+                    userId
+                  },
+                  {
+                    id: assetProfileId,
+                    dataSource,
+                    symbol,
+                    userId: profileOwner
+                  }
+                ]),
+              order: { update }
+            } as unknown as Prisma.TransactionClient)
+        );
       const service = new ActivitiesService(
         null,
         null,
@@ -796,6 +962,7 @@ describe('ActivitiesService', () => {
         null,
         null,
         {
+          $transaction: prismaTransaction,
           order: {
             update,
             findUnique: jest.fn().mockResolvedValue({
@@ -808,6 +975,18 @@ describe('ActivitiesService', () => {
                 dataSource: profileDataSource
               }
             })
+          },
+          symbolProfile: {
+            findUnique: jest.fn().mockResolvedValue(
+              profileExists
+                ? {
+                    id: assetProfileId,
+                    symbol,
+                    dataSource,
+                    userId: profileOwner
+                  }
+                : null
+            )
           }
         } as unknown as PrismaService,
         null,
@@ -815,6 +994,7 @@ describe('ActivitiesService', () => {
       );
 
       const request = {
+        assetProfileId,
         assetProfileName,
         preserveComment,
         data: {
@@ -823,6 +1003,7 @@ describe('ActivitiesService', () => {
           assetClass: AssetClass.COMMODITY,
           assetSubClass: AssetSubClass.PRECIOUS_METAL,
           date: parseDate('2024-01-01'),
+          symbol,
           SymbolProfile: {
             connect: {
               dataSource_symbol: {

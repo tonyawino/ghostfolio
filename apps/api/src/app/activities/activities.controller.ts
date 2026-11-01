@@ -343,12 +343,14 @@ export class ActivitiesController {
     const date = parseISO(data.date);
 
     const accountId = data.accountId;
+    const assetProfileId = data.assetProfileId;
     const assetProfileName = data.assetProfileName;
     const customCurrency = data.customCurrency;
     const dataSource = data.dataSource;
     const preserveComment = data.preserveComment;
 
     delete data.accountId;
+    delete data.assetProfileId;
     delete data.assetProfileName;
     delete data.preserveComment;
 
@@ -361,6 +363,7 @@ export class ActivitiesController {
     delete data.dataSource;
 
     return this.activitiesService.updateActivity({
+      assetProfileId,
       assetProfileName,
       preserveComment,
       userId,

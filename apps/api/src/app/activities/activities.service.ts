@@ -900,6 +900,7 @@ export class ActivitiesService {
   }
 
   public async updateActivity({
+    assetProfileId,
     assetProfileName,
     data,
     originalDate,
@@ -907,6 +908,7 @@ export class ActivitiesService {
     userId,
     where
   }: {
+    assetProfileId?: string;
     assetProfileName?: string;
     data: Prisma.OrderUpdateInput & {
       assetClass?: AssetClass;
@@ -921,7 +923,21 @@ export class ActivitiesService {
     userId: string;
     where: Prisma.OrderWhereUniqueInput;
   }): Promise<Order> {
+    const hasAssetProfileId = assetProfileId !== undefined;
     const hasAssetProfileName = assetProfileName !== undefined;
+    const requestedAssetProfileSymbol = hasAssetProfileId ? data.symbol : undefined;
+    if (
+      hasAssetProfileId &&
+      (typeof assetProfileId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          assetProfileId
+        ))
+    ) {
+      throw new BadRequestException('Invalid asset profile identity');
+    }
+    if (hasAssetProfileId && hasAssetProfileName) {
+      throw new BadRequestException('Conflicting asset profile options');
+    }
     if (
       hasAssetProfileName &&
       (typeof assetProfileName !== 'string' ||
@@ -934,7 +950,7 @@ export class ActivitiesService {
       throw new BadRequestException('Invalid comment preservation option');
     }
     const guardedActivity =
-      hasAssetProfileName || preserveComment === true
+      hasAssetProfileName || hasAssetProfileId || preserveComment === true
         ? await this.prismaService.order.findUnique({
             select: {
               type: true,
@@ -947,12 +963,39 @@ export class ActivitiesService {
           })
         : undefined;
     if (
-      (hasAssetProfileName || preserveComment === true) &&
+      (hasAssetProfileName || hasAssetProfileId || preserveComment === true) &&
       guardedActivity?.userId !== userId
     ) {
       throw new ForbiddenException('Activity update is not permitted');
     }
     const profileForRename = guardedActivity?.SymbolProfile;
+    if (hasAssetProfileId) {
+      if (
+        profileForRename?.dataSource !== DataSource.MANUAL ||
+        data.SymbolProfile?.connect?.dataSource_symbol?.dataSource !==
+          DataSource.MANUAL ||
+        data.type !== ActivityType.SELL ||
+        guardedActivity.type !== ActivityType.SELL ||
+        typeof data.symbol !== 'string' ||
+        !data.symbol.trim()
+      ) {
+        throw new BadRequestException('Asset profile identity is unsupported');
+      }
+      const targetProfile = await this.prismaService.symbolProfile.findUnique({
+        select: { id: true, symbol: true, dataSource: true, userId: true },
+        where: { id: assetProfileId }
+      });
+      if (
+        targetProfile?.dataSource !== DataSource.MANUAL ||
+        targetProfile.symbol !== data.symbol
+      ) {
+        throw new BadRequestException('Asset profile identity is unavailable');
+      }
+      if (targetProfile.userId !== null && targetProfile.userId !== userId) {
+        throw new ForbiddenException('Asset profile identity is unavailable');
+      }
+      data.SymbolProfile = { connect: { id: targetProfile.id } };
+    }
     if (hasAssetProfileName) {
       if (
         data.SymbolProfile?.connect?.dataSource_symbol?.dataSource !==
@@ -989,10 +1032,11 @@ export class ActivitiesService {
     }
 
     if (
-      hasAssetProfileName ||
-      NON_INVESTMENT_ACTIVITY_TYPES.includes(data.type) ||
-      (data.SymbolProfile.connect.dataSource_symbol.dataSource === 'MANUAL' &&
-        data.type === 'BUY')
+      !hasAssetProfileId &&
+      (hasAssetProfileName ||
+        NON_INVESTMENT_ACTIVITY_TYPES.includes(data.type) ||
+        (data.SymbolProfile.connect.dataSource_symbol.dataSource === 'MANUAL' &&
+          data.type === 'BUY'))
     ) {
       delete data.SymbolProfile.connect;
 
@@ -1020,7 +1064,10 @@ export class ActivitiesService {
     } else {
       delete data.SymbolProfile.update;
 
-      if (!isActivityInFuture({ date: data.date as Date })) {
+      if (
+        !hasAssetProfileId &&
+        !isActivityInFuture({ date: data.date as Date })
+      ) {
         // Gather symbol data of order in the background, if the date is not in
         // the future
         this.dataGatheringService.gatherSymbols({
@@ -1066,20 +1113,106 @@ export class ActivitiesService {
       tagsToUpdate = { connect: { id: TAG_ID_DRAFT } };
     }
 
-    const activity = await this.prismaService.order.update({
-      where:
-        hasAssetProfileName || preserveComment === true
-          ? {
-              ...where,
+    const updateData = {
+      ...data,
+      tags: tagsToUpdate
+    };
+    const activity = hasAssetProfileId
+      ? await this.prismaService.$transaction(async (transaction) => {
+          if (typeof where.id !== 'string') {
+            throw new BadRequestException('Asset profile identity is unsupported');
+          }
+
+          const [lockedActivity] = await transaction.$queryRaw<
+            {
+              id: string;
+              userId: string;
+              type: ActivityType;
+              symbolProfileId: string;
+            }[]
+          >`
+            SELECT order_row."id", order_row."userId", order_row."type",
+                   order_row."symbolProfileId"
+            FROM "Order" AS order_row
+            WHERE order_row."id" = ${where.id}
+              AND order_row."userId" = ${userId}
+            FOR UPDATE OF order_row
+          `;
+          if (
+            lockedActivity?.type !== ActivityType.SELL ||
+            !lockedActivity.symbolProfileId
+          ) {
+            throw new BadRequestException(
+              'Asset profile identity is unsupported'
+            );
+          }
+
+          const lockedProfiles = await transaction.$queryRaw<
+            {
+              id: string;
+              symbol: string;
+              dataSource: DataSource;
+              userId: string | null;
+            }[]
+          >`
+            SELECT "id", "symbol", "dataSource", "userId"
+            FROM "SymbolProfile"
+            WHERE "id" IN (${lockedActivity.symbolProfileId}, ${assetProfileId})
+            ORDER BY "id"
+            FOR UPDATE
+          `;
+          const lockedSource = lockedProfiles.find(
+            (profile) => profile.id === lockedActivity.symbolProfileId
+          );
+          const lockedTarget = lockedProfiles.find(
+            (profile) => profile.id === assetProfileId
+          );
+          if (lockedSource?.dataSource !== DataSource.MANUAL) {
+            throw new BadRequestException(
+              'Asset profile identity is unsupported'
+            );
+          }
+          if (
+            lockedTarget?.dataSource !== DataSource.MANUAL ||
+            lockedTarget.symbol !== requestedAssetProfileSymbol
+          ) {
+            throw new BadRequestException(
+              'Asset profile identity is unavailable'
+            );
+          }
+          if (
+            lockedTarget.userId !== null &&
+            lockedTarget.userId !== userId
+          ) {
+            throw new ForbiddenException(
+              'Asset profile identity is unavailable'
+            );
+          }
+
+          updateData.SymbolProfile = { connect: { id: lockedTarget.id } };
+          return transaction.order.update({
+            where: {
+              id: lockedActivity.id,
               userId,
-              ...(hasAssetProfileName ? { type: guardedActivity.type } : {})
-            }
-          : where,
-      data: {
-        ...data,
-        tags: tagsToUpdate
-      }
-    });
+              type: ActivityType.SELL,
+              symbolProfileId: lockedActivity.symbolProfileId
+            },
+            data: updateData
+          });
+        })
+      : await this.prismaService.order.update({
+          where:
+            hasAssetProfileName || preserveComment === true
+              ? {
+                  ...where,
+                  userId,
+                  ...(hasAssetProfileName
+                    ? { type: guardedActivity.type }
+                    : {})
+                }
+              : where,
+          data: updateData
+        });
 
     this.eventEmitter.emit(
       PortfolioChangedEvent.getName(),

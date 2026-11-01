@@ -43,6 +43,35 @@ describe('ActivitiesController explicit update options', () => {
     expect(dto).toHaveProperty('assetProfileName', 'RENAMED');
   });
 
+  it('accepts an exact existing asset profile UUID', async () => {
+    const dto = plainToInstance(
+      UpdateOrderDto,
+      updateBody({
+        assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+        type: 'SELL'
+      })
+    );
+
+    expect(
+      await validate(dto, { whitelist: true, forbidNonWhitelisted: true })
+    ).toEqual([]);
+  });
+
+  it('rejects a malformed asset profile UUID', async () => {
+    const dto = plainToInstance(
+      UpdateOrderDto,
+      updateBody({ assetProfileId: 'not-a-uuid', type: 'SELL' })
+    );
+
+    expect(
+      await validate(dto, { whitelist: true, forbidNonWhitelisted: true })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ property: 'assetProfileId' })
+      ])
+    );
+  });
+
   it.each(['', '   ', null, 1, 'x'.repeat(SYMBOL_MAXIMUM_LENGTH + 1)])(
     'rejects an invalid explicit profile name: %j',
     async (assetProfileName) => {
@@ -113,5 +142,38 @@ describe('ActivitiesController explicit update options', () => {
     });
     expect(request.data).not.toHaveProperty('assetProfileName');
     expect(request.data).not.toHaveProperty('preserveComment');
+  });
+
+  it('passes the verified profile UUID separately from Prisma activity data', async () => {
+    const service = {
+      order: jest.fn().mockResolvedValue({ date: new Date('2024-01-01') }),
+      updateActivity: jest.fn().mockResolvedValue({ id: 'activity-id' })
+    };
+    const controller = new ActivitiesController(
+      service as unknown as ActivitiesService,
+      null,
+      null,
+      null,
+      null
+    );
+    const data = plainToInstance(
+      UpdateOrderDto,
+      updateBody({
+        assetProfileId: 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a',
+        type: 'SELL'
+      })
+    );
+
+    await controller.updateActivity(
+      data,
+      { userId: 'user-id' } as ImpersonationContext,
+      'activity-id'
+    );
+
+    const request = service.updateActivity.mock.calls[0][0];
+    expect(request.assetProfileId).toBe(
+      'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a'
+    );
+    expect(request.data).not.toHaveProperty('assetProfileId');
   });
 });
