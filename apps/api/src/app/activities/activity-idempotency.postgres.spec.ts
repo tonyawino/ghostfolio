@@ -440,6 +440,43 @@ postgresDescribe('activity create idempotency (disposable PostgreSQL)', () => {
     expect(await balance()).toBe(before);
   });
 
+  it('does not let an activity update reuse a deleted idempotent result ID', async () => {
+    const key = randomUUID();
+    const s = service();
+    const original = await s.createActivityIdempotently(input(), options(key));
+    await prisma.order.delete({ where: { id: original.id } });
+
+    const replacement = await s.createActivityIdempotently(
+      input({ date: new Date('2026-02-01') }),
+      options(randomUUID())
+    );
+    await s.updateActivity({
+      userId,
+      originalDate: replacement.date,
+      where: { id: replacement.id },
+      data: {
+        id: original.id,
+        type: 'BUY',
+        assetClass: 'EQUITY',
+        assetSubClass: 'STOCK',
+        symbol,
+        date: replacement.date,
+        SymbolProfile: {
+          connect: {
+            dataSource_symbol: { dataSource: 'MANUAL', symbol }
+          }
+        }
+      }
+    });
+
+    expect(
+      await prisma.order.findUnique({ where: { id: replacement.id } })
+    ).not.toBeNull();
+    await expect(
+      s.createActivityIdempotently(input(), options(key))
+    ).rejects.toMatchObject({ status: 410 });
+  });
+
   it('safely retries post-commit gathering failures using the stable job ID', async () => {
     const key = randomUUID();
     gathering.addJobToQueue.mockRejectedValueOnce(

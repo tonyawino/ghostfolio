@@ -966,6 +966,10 @@ export class ActivitiesService {
     userId: string;
     where: Prisma.OrderWhereUniqueInput;
   }): Promise<Order> {
+    // The activity ID is selected by the route's `where` clause. The DTO also
+    // carries it for the client URL, but it must not become mutable update data.
+    delete data.id;
+
     const areTagsProvided = data.tags !== undefined;
     const tags = data.tags ?? [];
 
