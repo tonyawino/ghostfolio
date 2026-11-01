@@ -7,6 +7,7 @@ import { WHERE_ACTIVITY_NOT_DRAFT } from '@ghostfolio/api/helper/activity.helper
 import { AssetProfileSplitService } from '@ghostfolio/api/services/asset-profile-split/asset-profile-split.service';
 import { ExchangeRateDataService } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service';
 import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
+import { DataGatheringService } from '@ghostfolio/api/services/queues/data-gathering/data-gathering.service';
 import { SymbolProfileService } from '@ghostfolio/api/services/symbol-profile/symbol-profile.service';
 import { TagService } from '@ghostfolio/api/services/tag/tag.service';
 import { getIntervalFromDateRange } from '@ghostfolio/common/calculation-helper';
@@ -18,6 +19,7 @@ import { parseDate } from '@ghostfolio/common/helper';
 import { Activity, Filter } from '@ghostfolio/common/interfaces';
 import { DateRange } from '@ghostfolio/common/types';
 
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   AssetClass,
@@ -584,6 +586,146 @@ describe('ActivitiesService', () => {
   });
 
   describe('updateActivity', () => {
+    it.each([ActivityType.BUY, ActivityType.SELL])(
+      'updates an explicitly named manual %s profile without changing its key',
+      async (type) => {
+        const data = await getUpdatedActivityData({
+          activityType: type,
+          assetProfileName: 'RENAMED',
+          type,
+          userId: 'user-id'
+        });
+
+        expect(data.SymbolProfile).toEqual({
+          update: {
+            data: {
+              assetClass: AssetClass.COMMODITY,
+              assetSubClass: AssetSubClass.PRECIOUS_METAL,
+              name: 'RENAMED'
+            },
+            where: {
+              id: 'profile-id',
+              userId: 'user-id',
+              dataSource: DataSource.MANUAL
+            }
+          }
+        });
+        expect(data).not.toHaveProperty('assetProfileName');
+      }
+    );
+
+    it('preserves the label when ordinary callers send the existing profile UUID', async () => {
+      const data = await getUpdatedActivityData({
+        symbol: 'a7f68467-4f77-42da-82d2-2c701456cc93',
+        userId: 'user-id'
+      });
+
+      expect(data.SymbolProfile.update).not.toHaveProperty('data.name');
+      expect(data.comment).toBeNull();
+    });
+
+    it.each([
+      {
+        profileOwner: null,
+        profileDataSource: DataSource.MANUAL,
+        error: ForbiddenException
+      },
+      {
+        profileOwner: 'other-user-id',
+        profileDataSource: DataSource.MANUAL,
+        error: ForbiddenException
+      },
+      {
+        profileOwner: 'user-id',
+        profileDataSource: DataSource.YAHOO,
+        error: BadRequestException
+      }
+    ])(
+      'rejects explicit names for an unowned or shared profile: %j',
+      async ({ profileOwner, profileDataSource, error }) => {
+        const update = jest.fn();
+
+        await expect(
+          getUpdatedActivityData({
+            assetProfileName: 'RENAMED',
+            profileDataSource,
+            update,
+            userId: profileOwner
+          })
+        ).rejects.toThrow(error);
+        expect(update).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each([
+      { dataSource: DataSource.YAHOO, type: ActivityType.BUY },
+      { dataSource: DataSource.MANUAL, type: ActivityType.FEE }
+    ])(
+      'rejects explicit names for unsupported source/type: %j',
+      async ({ dataSource, type }) => {
+        const update = jest.fn();
+
+        await expect(
+          getUpdatedActivityData({
+            assetProfileName: 'RENAMED',
+            dataSource,
+            type,
+            update,
+            userId: 'user-id'
+          })
+        ).rejects.toThrow(BadRequestException);
+        expect(update).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects an explicit name when the persisted activity type does not match', async () => {
+      const update = jest.fn();
+
+      await expect(
+        getUpdatedActivityData({
+          activityType: ActivityType.SELL,
+          assetProfileName: 'RENAMED',
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(BadRequestException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('preserves an omitted comment only when explicitly requested', async () => {
+      const data = await getUpdatedActivityData({
+        preserveComment: true,
+        userId: 'user-id'
+      });
+
+      expect(data).not.toHaveProperty('comment');
+      expect(data).not.toHaveProperty('preserveComment');
+    });
+
+    it('keeps an explicit comment clear when preservation is requested', async () => {
+      const data = await getUpdatedActivityData({
+        comment: '',
+        preserveComment: true,
+        userId: 'user-id'
+      });
+
+      expect(data.comment).toBeNull();
+    });
+
+    it('rejects comment preservation for another user activity', async () => {
+      const update = jest.fn();
+
+      await expect(
+        getUpdatedActivityData({
+          activityOwner: 'other-user-id',
+          preserveComment: true,
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(ForbiddenException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
     it('updates the custom asset profile of the user', async () => {
       const data = await getUpdatedActivityData({ userId: 'user-id' });
 
@@ -619,24 +761,36 @@ describe('ActivitiesService', () => {
     });
 
     async function getUpdatedActivityData({
+      activityOwner = 'user-id',
+      activityType = ActivityType.BUY,
+      assetProfileName,
+      comment,
       dataSource = DataSource.MANUAL,
+      preserveComment,
+      profileDataSource = DataSource.MANUAL,
       symbol = 'GF_GOLD',
       type = ActivityType.BUY,
+      update = jest.fn().mockResolvedValue({ userId: 'user-id' }),
       userId
     }: {
+      activityOwner?: string;
+      activityType?: ActivityType;
+      assetProfileName?: string;
+      comment?: string;
       dataSource?: DataSource;
+      preserveComment?: boolean;
+      profileDataSource?: DataSource;
       symbol?: string;
       type?: ActivityType;
+      update?: jest.Mock;
       userId: string | null;
     }) {
-      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
-
       const service = new ActivitiesService(
         null,
         null,
         null,
         null,
-        null,
+        { gatherSymbols: jest.fn() } as unknown as DataGatheringService,
         null,
         { emit: jest.fn() } as unknown as EventEmitter2,
         null,
@@ -644,17 +798,27 @@ describe('ActivitiesService', () => {
         {
           order: {
             update,
-            findUnique: jest
-              .fn()
-              .mockResolvedValue({ SymbolProfile: { userId } })
+            findUnique: jest.fn().mockResolvedValue({
+              id: 'activity-id',
+              userId: activityOwner,
+              type: activityType,
+              SymbolProfile: {
+                id: 'profile-id',
+                userId,
+                dataSource: profileDataSource
+              }
+            })
           }
         } as unknown as PrismaService,
         null,
         { validateTagIds: jest.fn() } as unknown as TagService
       );
 
-      await service.updateActivity({
+      const request = {
+        assetProfileName,
+        preserveComment,
         data: {
+          ...(comment !== undefined ? { comment } : {}),
           type,
           assetClass: AssetClass.COMMODITY,
           assetSubClass: AssetSubClass.PRECIOUS_METAL,
@@ -676,7 +840,8 @@ describe('ActivitiesService', () => {
         originalDate: parseDate('2024-01-01'),
         userId: 'user-id',
         where: { id: 'activity-id' }
-      });
+      };
+      await service.updateActivity(request);
 
       return (update.mock.calls[0] as [Prisma.OrderUpdateArgs])[0].data;
     }

@@ -15,6 +15,7 @@ import { Transform, TransformFnParams } from 'class-transformer';
 import {
   ArrayUnique,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsISO8601,
   IsNotEmpty,
@@ -23,7 +24,8 @@ import {
   IsString,
   MaxLength,
   Min,
-  Validate
+  Validate,
+  ValidateIf
 } from 'class-validator';
 import { isString } from 'lodash-es';
 
@@ -39,6 +41,15 @@ export class UpdateOrderDto {
   @IsEnum(AssetSubClass)
   @IsOptional()
   assetSubClass?: AssetSubClass;
+
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsNotEmpty()
+  @IsString()
+  @MaxLength(SYMBOL_MAXIMUM_LENGTH)
+  @Transform(({ value }: TransformFnParams) =>
+    isString(value) ? value.trim() : value
+  )
+  assetProfileName?: string;
 
   @IsOptional()
   @IsString()
@@ -68,6 +79,10 @@ export class UpdateOrderDto {
 
   @IsString()
   id: string;
+
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsBoolean()
+  preserveComment?: boolean;
 
   @IsNumber()
   @Min(0)

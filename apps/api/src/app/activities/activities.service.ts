@@ -26,6 +26,7 @@ import {
   GATHER_ASSET_PROFILE_PROCESS_JOB_NAME,
   GATHER_ASSET_PROFILE_PROCESS_JOB_OPTIONS,
   NON_INVESTMENT_ACTIVITY_TYPES,
+  SYMBOL_MAXIMUM_LENGTH,
   TAG_ID_DRAFT,
   TAG_ID_EXCLUDE_FROM_ANALYSIS
 } from '@ghostfolio/common/config';
@@ -47,7 +48,11 @@ import {
 } from '@ghostfolio/common/interfaces';
 import { OrderWithAccount } from '@ghostfolio/common/types';
 
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   AssetClass,
@@ -895,11 +900,14 @@ export class ActivitiesService {
   }
 
   public async updateActivity({
+    assetProfileName,
     data,
     originalDate,
+    preserveComment,
     userId,
     where
   }: {
+    assetProfileName?: string;
     data: Prisma.OrderUpdateInput & {
       assetClass?: AssetClass;
       assetSubClass?: AssetSubClass;
@@ -909,9 +917,60 @@ export class ActivitiesService {
       type?: ActivityType;
     };
     originalDate: Date;
+    preserveComment?: boolean;
     userId: string;
     where: Prisma.OrderWhereUniqueInput;
   }): Promise<Order> {
+    const hasAssetProfileName = assetProfileName !== undefined;
+    if (
+      hasAssetProfileName &&
+      (typeof assetProfileName !== 'string' ||
+        assetProfileName.trim().length === 0 ||
+        assetProfileName.trim().length > SYMBOL_MAXIMUM_LENGTH)
+    ) {
+      throw new BadRequestException('Invalid asset profile display name');
+    }
+    if (preserveComment !== undefined && typeof preserveComment !== 'boolean') {
+      throw new BadRequestException('Invalid comment preservation option');
+    }
+    const guardedActivity =
+      hasAssetProfileName || preserveComment === true
+        ? await this.prismaService.order.findUnique({
+            select: {
+              type: true,
+              userId: true,
+              SymbolProfile: {
+                select: { id: true, dataSource: true, userId: true }
+              }
+            },
+            where
+          })
+        : undefined;
+    if (
+      (hasAssetProfileName || preserveComment === true) &&
+      guardedActivity?.userId !== userId
+    ) {
+      throw new ForbiddenException('Activity update is not permitted');
+    }
+    const profileForRename = guardedActivity?.SymbolProfile;
+    if (hasAssetProfileName) {
+      if (
+        data.SymbolProfile?.connect?.dataSource_symbol?.dataSource !==
+          DataSource.MANUAL ||
+        profileForRename?.dataSource !== DataSource.MANUAL ||
+        (data.type !== ActivityType.BUY && data.type !== ActivityType.SELL) ||
+        guardedActivity.type !== data.type
+      ) {
+        throw new BadRequestException(
+          'Asset profile display name is unsupported'
+        );
+      }
+      if (profileForRename.userId !== userId) {
+        throw new ForbiddenException(
+          'Asset profile display name is unavailable'
+        );
+      }
+    }
     const areTagsProvided = data.tags !== undefined;
     const tags = data.tags ?? [];
 
@@ -922,29 +981,38 @@ export class ActivitiesService {
       })
     });
 
-    if (!data.comment) {
+    if (
+      !data.comment &&
+      !(preserveComment === true && data.comment === undefined)
+    ) {
       data.comment = null;
     }
 
     if (
+      hasAssetProfileName ||
       NON_INVESTMENT_ACTIVITY_TYPES.includes(data.type) ||
       (data.SymbolProfile.connect.dataSource_symbol.dataSource === 'MANUAL' &&
         data.type === 'BUY')
     ) {
       delete data.SymbolProfile.connect;
 
-      const activityToUpdate = await this.prismaService.order.findUnique({
-        select: { SymbolProfile: { select: { userId: true } } },
-        where
-      });
+      const activityToUpdate =
+        guardedActivity ??
+        (await this.prismaService.order.findUnique({
+          select: { SymbolProfile: { select: { userId: true } } },
+          where
+        }));
 
       if (activityToUpdate?.SymbolProfile.userId === userId) {
         data.SymbolProfile.update = {
           data: {
             assetClass: data.assetClass,
-            assetSubClass: data.assetSubClass
+            assetSubClass: data.assetSubClass,
+            ...(hasAssetProfileName ? { name: assetProfileName.trim() } : {})
           },
-          where: { userId }
+          where: hasAssetProfileName
+            ? { id: profileForRename.id, userId, dataSource: DataSource.MANUAL }
+            : { userId }
         };
       } else {
         delete data.SymbolProfile;
@@ -999,7 +1067,14 @@ export class ActivitiesService {
     }
 
     const activity = await this.prismaService.order.update({
-      where,
+      where:
+        hasAssetProfileName || preserveComment === true
+          ? {
+              ...where,
+              userId,
+              ...(hasAssetProfileName ? { type: guardedActivity.type } : {})
+            }
+          : where,
       data: {
         ...data,
         tags: tagsToUpdate
