@@ -78,6 +78,10 @@ export class UpdateOrderDto {
   @Validate(IsAfter1970Constraint)
   date: string;
 
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsUUID()
+  expectedAssetProfileId?: string;
+
   @IsNumber()
   @Min(0)
   fee: number;

@@ -21,27 +21,40 @@ import {
 } from '@ghostfolio/common/interfaces';
 import { permissions } from '@ghostfolio/common/permissions';
 import { scopes } from '@ghostfolio/common/scopes';
-import type { ImpersonationContext } from '@ghostfolio/common/types';
+import type {
+  ImpersonationContext,
+  RequestWithUser
+} from '@ghostfolio/common/types';
 
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
+  Header,
+  HttpCode,
   HttpException,
   Param,
   Post,
   Put,
   Query,
+  Req,
+  UseGuards,
   UseInterceptors
 } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import { Order } from '@prisma/client';
 import { parseISO } from 'date-fns';
 import { StatusCodes, getReasonPhrase } from 'http-status-codes';
 import { omit } from 'lodash-es';
 
 import { ActivitiesFilterDto } from './activities-filter.dto';
-import { ActivitiesService } from './activities.service';
+import {
+  ActivitiesService,
+  ActivityIdentity,
+  ACTIVITY_IDENTITY_BATCH_LIMIT
+} from './activities.service';
 import { GetActivitiesDto } from './get-activities.dto';
 
 @Controller('activities')
@@ -177,6 +190,48 @@ export class ActivitiesController {
     });
 
     return { activities, count };
+  }
+
+  @Post('identities')
+  @HttpCode(StatusCodes.OK)
+  @UseGuards(AuthGuard('jwt'))
+  @Header('Cache-Control', 'no-store')
+  public async getActivityIdentities(
+    @Req() request: RequestWithUser,
+    @Body() body: { activityIds?: unknown }
+  ): Promise<{ activities: ActivityIdentity[] }> {
+    const activityIds = body?.activityIds;
+    if (
+      !Array.isArray(activityIds) ||
+      activityIds.length === 0 ||
+      activityIds.length > ACTIVITY_IDENTITY_BATCH_LIMIT ||
+      !activityIds.every(
+        (id: unknown): id is string => typeof id === 'string' && id.length > 0
+      )
+    ) {
+      throw new BadRequestException('Invalid activity identity batch');
+    }
+    const identities = await this.activitiesService.getActivityIdentities({
+      activityIds,
+      userId: request.user.id
+    });
+    if (!identities) {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.NOT_FOUND),
+        StatusCodes.NOT_FOUND
+      );
+    }
+    return {
+      activities: identities.map((identity) => ({
+        id: identity.id,
+        accountId: identity.accountId,
+        type: identity.type,
+        dataSource: identity.dataSource,
+        symbol: identity.symbol,
+        assetProfileId: identity.assetProfileId,
+        assetProfileUserId: identity.assetProfileUserId
+      }))
+    };
   }
 
   @Get(':id')
@@ -345,6 +400,7 @@ export class ActivitiesController {
     const accountId = data.accountId;
     const assetProfileId = data.assetProfileId;
     const assetProfileName = data.assetProfileName;
+    const expectedAssetProfileId = data.expectedAssetProfileId;
     const customCurrency = data.customCurrency;
     const dataSource = data.dataSource;
     const preserveComment = data.preserveComment;
@@ -352,6 +408,7 @@ export class ActivitiesController {
     delete data.accountId;
     delete data.assetProfileId;
     delete data.assetProfileName;
+    delete data.expectedAssetProfileId;
     delete data.preserveComment;
 
     if (customCurrency) {
@@ -365,6 +422,7 @@ export class ActivitiesController {
     return this.activitiesService.updateActivity({
       assetProfileId,
       assetProfileName,
+      expectedAssetProfileId,
       preserveComment,
       userId,
       data: {

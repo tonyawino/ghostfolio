@@ -60,6 +60,7 @@ import {
   DataSource,
   Order,
   Prisma,
+  SymbolProfile,
   Tag,
   Type as ActivityType
 } from '@prisma/client';
@@ -67,6 +68,18 @@ import { Big } from 'big.js';
 import { endOfDay, isAfter } from 'date-fns';
 import { groupBy, omit, uniqBy } from 'lodash-es';
 import { randomUUID } from 'node:crypto';
+
+export interface ActivityIdentity {
+  id: string;
+  accountId: string;
+  type: 'BUY' | 'SELL';
+  dataSource: 'MANUAL';
+  symbol: string;
+  assetProfileId: string;
+  assetProfileUserId: string | null;
+}
+
+export const ACTIVITY_IDENTITY_BATCH_LIMIT = 100;
 
 @Injectable()
 export class ActivitiesService {
@@ -891,6 +904,84 @@ export class ActivitiesService {
     );
   }
 
+  public async getActivityIdentities({
+    activityIds,
+    userId
+  }: {
+    activityIds: string[];
+    userId: string;
+  }): Promise<ActivityIdentity[] | null> {
+    if (
+      !Array.isArray(activityIds) ||
+      activityIds.length === 0 ||
+      activityIds.length > ACTIVITY_IDENTITY_BATCH_LIMIT ||
+      activityIds.some((id) => typeof id !== 'string' || id.length === 0) ||
+      new Set(activityIds).size !== activityIds.length
+    ) {
+      return null;
+    }
+    const activities = await this.prismaService.$queryRaw<
+      (Pick<Order, 'id' | 'userId' | 'accountId' | 'accountUserId' | 'type'> & {
+        SymbolProfile: Pick<
+          SymbolProfile,
+          'id' | 'dataSource' | 'symbol' | 'userId'
+        >;
+      })[]
+    >`
+      SELECT order_row."id", order_row."userId", order_row."accountId", order_row."accountUserId", order_row."type",
+        json_build_object(
+          'id', profile_row."id", 'dataSource', profile_row."dataSource",
+          'symbol', profile_row."symbol", 'userId', profile_row."userId"
+        ) AS "SymbolProfile"
+      FROM "Order" AS order_row
+      INNER JOIN "Account" AS account_row
+        ON account_row."id" = order_row."accountId"
+        AND account_row."userId" = order_row."accountUserId"
+      INNER JOIN "SymbolProfile" AS profile_row
+        ON profile_row."id" = order_row."symbolProfileId"
+      WHERE order_row."id" IN (${Prisma.join(activityIds)})
+        AND order_row."userId" = ${userId}
+        AND order_row."accountUserId" = ${userId}
+        AND order_row."type" IN ('BUY', 'SELL')
+        AND profile_row."dataSource" = 'MANUAL'
+        AND (profile_row."userId" IS NULL OR profile_row."userId" = ${userId})
+    `;
+    if (activities.length !== activityIds.length) return null;
+    const requestedIds = new Set(activityIds);
+    const identities = new Map<string, ActivityIdentity>();
+    for (const activity of activities) {
+      if (
+        !requestedIds.has(activity.id) ||
+        identities.has(activity.id) ||
+        activity.userId !== userId ||
+        !activity.accountId ||
+        activity.accountUserId !== userId ||
+        (activity.type !== ActivityType.BUY &&
+          activity.type !== ActivityType.SELL) ||
+        activity.SymbolProfile.dataSource !== DataSource.MANUAL ||
+        (activity.SymbolProfile.userId !== null &&
+          activity.SymbolProfile.userId !== userId)
+      )
+        return null;
+      identities.set(activity.id, {
+        id: activity.id,
+        accountId: activity.accountId,
+        type: activity.type,
+        dataSource: DataSource.MANUAL,
+        symbol: activity.SymbolProfile.symbol,
+        assetProfileId: activity.SymbolProfile.id,
+        assetProfileUserId: activity.SymbolProfile.userId
+      });
+    }
+    const ordered: ActivityIdentity[] = [];
+    for (const id of activityIds) {
+      const identity = identities.get(id);
+      if (!identity) return null;
+      ordered.push(identity);
+    }
+    return ordered;
+  }
+
   public async order(
     orderWhereUniqueInput: Prisma.OrderWhereUniqueInput
   ): Promise<Order | null> {
@@ -903,6 +994,7 @@ export class ActivitiesService {
     assetProfileId,
     assetProfileName,
     data,
+    expectedAssetProfileId,
     originalDate,
     preserveComment,
     userId,
@@ -918,6 +1010,7 @@ export class ActivitiesService {
       tags?: { id: string }[];
       type?: ActivityType;
     };
+    expectedAssetProfileId?: string;
     originalDate: Date;
     preserveComment?: boolean;
     userId: string;
@@ -925,7 +1018,10 @@ export class ActivitiesService {
   }): Promise<Order> {
     const hasAssetProfileId = assetProfileId !== undefined;
     const hasAssetProfileName = assetProfileName !== undefined;
-    const requestedAssetProfileSymbol = hasAssetProfileId ? data.symbol : undefined;
+    const hasExpectedAssetProfileId = expectedAssetProfileId !== undefined;
+    const requestedAssetProfileSymbol = hasAssetProfileId
+      ? data.symbol
+      : undefined;
     if (
       hasAssetProfileId &&
       (typeof assetProfileId !== 'string' ||
@@ -937,6 +1033,20 @@ export class ActivitiesService {
     }
     if (hasAssetProfileId && hasAssetProfileName) {
       throw new BadRequestException('Conflicting asset profile options');
+    }
+    if (hasAssetProfileName !== hasExpectedAssetProfileId) {
+      throw new BadRequestException(
+        'Expected asset profile identity is required for a display name'
+      );
+    }
+    if (
+      hasExpectedAssetProfileId &&
+      (typeof expectedAssetProfileId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          expectedAssetProfileId
+        ))
+    ) {
+      throw new BadRequestException('Invalid expected asset profile identity');
     }
     if (
       hasAssetProfileName &&
@@ -1001,8 +1111,9 @@ export class ActivitiesService {
         data.SymbolProfile?.connect?.dataSource_symbol?.dataSource !==
           DataSource.MANUAL ||
         profileForRename?.dataSource !== DataSource.MANUAL ||
-        (data.type !== ActivityType.BUY && data.type !== ActivityType.SELL) ||
-        guardedActivity.type !== data.type
+        data.type !== ActivityType.BUY ||
+        guardedActivity.type !== ActivityType.BUY ||
+        profileForRename.id !== expectedAssetProfileId
       ) {
         throw new BadRequestException(
           'Asset profile display name is unsupported'
@@ -1049,13 +1160,18 @@ export class ActivitiesService {
 
       if (activityToUpdate?.SymbolProfile.userId === userId) {
         data.SymbolProfile.update = {
-          data: {
-            assetClass: data.assetClass,
-            assetSubClass: data.assetSubClass,
-            ...(hasAssetProfileName ? { name: assetProfileName.trim() } : {})
-          },
+          data: hasAssetProfileName
+            ? { name: assetProfileName.trim() }
+            : {
+                assetClass: data.assetClass,
+                assetSubClass: data.assetSubClass
+              },
           where: hasAssetProfileName
-            ? { id: profileForRename.id, userId, dataSource: DataSource.MANUAL }
+            ? {
+                id: expectedAssetProfileId,
+                userId,
+                dataSource: DataSource.MANUAL
+              }
             : { userId }
         };
       } else {
@@ -1120,7 +1236,9 @@ export class ActivitiesService {
     const activity = hasAssetProfileId
       ? await this.prismaService.$transaction(async (transaction) => {
           if (typeof where.id !== 'string') {
-            throw new BadRequestException('Asset profile identity is unsupported');
+            throw new BadRequestException(
+              'Asset profile identity is unsupported'
+            );
           }
 
           const [lockedActivity] = await transaction.$queryRaw<
@@ -1180,10 +1298,7 @@ export class ActivitiesService {
               'Asset profile identity is unavailable'
             );
           }
-          if (
-            lockedTarget.userId !== null &&
-            lockedTarget.userId !== userId
-          ) {
+          if (lockedTarget.userId !== null && lockedTarget.userId !== userId) {
             throw new ForbiddenException(
               'Asset profile identity is unavailable'
             );
@@ -1200,19 +1315,83 @@ export class ActivitiesService {
             data: updateData
           });
         })
-      : await this.prismaService.order.update({
-          where:
-            hasAssetProfileName || preserveComment === true
-              ? {
-                  ...where,
-                  userId,
-                  ...(hasAssetProfileName
-                    ? { type: guardedActivity.type }
-                    : {})
-                }
-              : where,
-          data: updateData
-        });
+      : hasAssetProfileName
+        ? await this.prismaService.$transaction(async (transaction) => {
+            if (typeof where.id !== 'string') {
+              throw new BadRequestException(
+                'Asset profile display name is unsupported'
+              );
+            }
+            const [lockedActivity] = await transaction.$queryRaw<
+              {
+                id: string;
+                userId: string;
+                type: ActivityType;
+                symbolProfileId: string;
+              }[]
+            >`
+              SELECT order_row."id", order_row."userId", order_row."type", order_row."symbolProfileId"
+              FROM "Order" AS order_row
+              WHERE order_row."id" = ${where.id} AND order_row."userId" = ${userId}
+              FOR UPDATE OF order_row
+            `;
+            if (
+              lockedActivity?.userId !== userId ||
+              lockedActivity.type !== ActivityType.BUY ||
+              lockedActivity.symbolProfileId !== expectedAssetProfileId
+            ) {
+              throw new BadRequestException(
+                'Asset profile display name is unsupported'
+              );
+            }
+            const [lockedProfile] = await transaction.$queryRaw<
+              {
+                id: string;
+                dataSource: DataSource;
+                userId: string | null;
+              }[]
+            >`
+              SELECT "id", "dataSource", "userId"
+              FROM "SymbolProfile"
+              WHERE "id" = ${expectedAssetProfileId}
+              FOR UPDATE
+            `;
+            if (
+              lockedProfile?.id !== expectedAssetProfileId ||
+              lockedProfile.dataSource !== DataSource.MANUAL
+            ) {
+              throw new BadRequestException(
+                'Asset profile display name is unsupported'
+              );
+            }
+            if (lockedProfile.userId !== userId) {
+              throw new ForbiddenException(
+                'Asset profile display name is unavailable'
+              );
+            }
+            return transaction.order.update({
+              where: {
+                id: lockedActivity.id,
+                userId,
+                type: ActivityType.BUY,
+                symbolProfileId: expectedAssetProfileId
+              },
+              data: updateData
+            });
+          })
+        : await this.prismaService.order.update({
+            where:
+              hasAssetProfileName || preserveComment === true
+                ? {
+                    ...where,
+                    userId,
+                    ...(hasAssetProfileName
+                      ? { type: guardedActivity.type }
+                      : {})
+                  }
+                : where,
+            data: updateData
+          });
 
     this.eventEmitter.emit(
       PortfolioChangedEvent.getName(),

@@ -136,7 +136,9 @@ export class AssetProfilesController {
   public async getAssetProfileIdentity(
     @Param('dataSource') dataSource: DataSource,
     @Param('symbol') symbol: string
-  ): Promise<{ assetProfile: { id: string; symbol: string; userId: string | null } }> {
+  ): Promise<{
+    assetProfile: { id: string; symbol: string; userId: string | null };
+  }> {
     const profile = await this.assetProfilesService.getProfileIdentity({
       dataSource,
       symbol

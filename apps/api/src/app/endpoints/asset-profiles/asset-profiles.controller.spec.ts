@@ -1,7 +1,6 @@
-import { DataSource } from '@ghostfolio/prisma/enums';
-
 import { ApiService } from '@ghostfolio/api/services/api/api.service';
 import { SymbolProfileService } from '@ghostfolio/api/services/symbol-profile/symbol-profile.service';
+import { DataSource } from '@ghostfolio/prisma/enums';
 
 import { AssetProfilesController } from './asset-profiles.controller';
 import { AssetProfilesService } from './asset-profiles.service';

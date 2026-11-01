@@ -33,6 +33,7 @@ describe('ActivitiesController explicit update options', () => {
       UpdateOrderDto,
       updateBody({
         assetProfileName: ' RENAMED ',
+        expectedAssetProfileId: '7b9c2fb8-b593-4d3e-b5f7-8263b6cb77ee',
         preserveComment: true
       })
     );
@@ -68,6 +69,20 @@ describe('ActivitiesController explicit update options', () => {
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ property: 'assetProfileId' })
+      ])
+    );
+  });
+
+  it('rejects a malformed expected source profile UUID', async () => {
+    const dto = plainToInstance(
+      UpdateOrderDto,
+      updateBody({ expectedAssetProfileId: 'not-a-uuid' })
+    );
+    expect(
+      await validate(dto, { whitelist: true, forbidNonWhitelisted: true })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ property: 'expectedAssetProfileId' })
       ])
     );
   });
@@ -124,6 +139,7 @@ describe('ActivitiesController explicit update options', () => {
       UpdateOrderDto,
       updateBody({
         assetProfileName: 'RENAMED',
+        expectedAssetProfileId: '7b9c2fb8-b593-4d3e-b5f7-8263b6cb77ee',
         preserveComment: true
       })
     );
@@ -137,10 +153,12 @@ describe('ActivitiesController explicit update options', () => {
     const request = service.updateActivity.mock.calls[0][0];
     expect(request).toMatchObject({
       assetProfileName: 'RENAMED',
+      expectedAssetProfileId: '7b9c2fb8-b593-4d3e-b5f7-8263b6cb77ee',
       preserveComment: true,
       userId: 'user-id'
     });
     expect(request.data).not.toHaveProperty('assetProfileName');
+    expect(request.data).not.toHaveProperty('expectedAssetProfileId');
     expect(request.data).not.toHaveProperty('preserveComment');
   });
 
@@ -171,9 +189,7 @@ describe('ActivitiesController explicit update options', () => {
     );
 
     const request = service.updateActivity.mock.calls[0][0];
-    expect(request.assetProfileId).toBe(
-      'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a'
-    );
+    expect(request.assetProfileId).toBe('d90f1f59-6ebf-4aa2-9e62-1e576dd8d92a');
     expect(request.data).not.toHaveProperty('assetProfileId');
   });
 });

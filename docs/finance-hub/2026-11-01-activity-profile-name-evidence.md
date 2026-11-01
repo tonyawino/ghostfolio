@@ -1,5 +1,9 @@
 # Activity profile display-name evidence
 
+Historical proof: the later [batch identity and BUY rename evidence](2026-11-01-batch-activity-identity-evidence.md)
+supersedes this initial BUY/SELL name contract. The final name field is BUY-only
+and requires a locked expected profile UUID; SELL uses its separate target path.
+
 Work item: [Finance Hub #1376](https://github.com/tonyawino/finance-hub/issues/1376).
 
 The change adds two explicit activity-update options. `assetProfileName` updates

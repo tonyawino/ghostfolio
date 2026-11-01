@@ -586,6 +586,178 @@ describe('ActivitiesService', () => {
   });
 
   describe('updateActivity', () => {
+    const expectedBuyProfileId = '7b9c2fb8-b593-4d3e-b5f7-8263b6cb77ee';
+
+    it('requires an expected source profile UUID for an explicit BUY name', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+      await expect(
+        getUpdatedActivityData({
+          assetProfileName: 'RENAMED',
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(BadRequestException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an expected source profile without an explicit BUY name', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+      await expect(
+        getUpdatedActivityData({
+          expectedAssetProfileId: expectedBuyProfileId,
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(BadRequestException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a BUY source profile that differs from its expected UUID', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+      await expect(
+        getUpdatedActivityData({
+          assetProfileName: 'RENAMED',
+          expectedAssetProfileId: expectedBuyProfileId,
+          sourceProfileId: 'changed-profile-id',
+          update,
+          userId: 'user-id'
+        })
+      ).rejects.toThrow(BadRequestException);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'activity_profile',
+      'activity_owner',
+      'activity_type',
+      'profile_owner',
+      'profile_source'
+    ])(
+      'rechecks BUY %s under the activity/profile transaction locks',
+      async (changed) => {
+        const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+        const transaction = jest.fn(
+          async (
+            callback: (tx: Prisma.TransactionClient) => Promise<unknown>
+          ) =>
+            callback({
+              $queryRaw: jest
+                .fn()
+                .mockResolvedValueOnce([
+                  {
+                    id: 'activity-id',
+                    userId:
+                      changed === 'activity_owner' ? 'other-user' : 'user-id',
+                    type:
+                      changed === 'activity_type'
+                        ? ActivityType.SELL
+                        : ActivityType.BUY,
+                    symbolProfileId:
+                      changed === 'activity_profile'
+                        ? 'changed-profile-id'
+                        : expectedBuyProfileId
+                  }
+                ])
+                .mockResolvedValueOnce([
+                  {
+                    id: expectedBuyProfileId,
+                    dataSource:
+                      changed === 'profile_source'
+                        ? DataSource.YAHOO
+                        : DataSource.MANUAL,
+                    userId:
+                      changed === 'profile_owner' ? 'other-user' : 'user-id'
+                  }
+                ]),
+              order: { update }
+            } as unknown as Prisma.TransactionClient)
+        );
+        await expect(
+          getUpdatedActivityData({
+            assetProfileName: 'RENAMED',
+            expectedAssetProfileId: expectedBuyProfileId,
+            transaction,
+            update,
+            userId: 'user-id'
+          })
+        ).rejects.toThrow(
+          changed === 'profile_owner' ? ForbiddenException : BadRequestException
+        );
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(update).not.toHaveBeenCalled();
+      }
+    );
+
+    it('locks BUY then its exact expected MANUAL profile and renames atomically', async () => {
+      const update = jest.fn().mockResolvedValue({ userId: 'user-id' });
+      const lockQueries: string[] = [];
+      const queryRaw = jest.fn((strings: TemplateStringsArray) => {
+        lockQueries.push(strings.join(' '));
+        return Promise.resolve(
+          lockQueries.length === 1
+            ? [
+                {
+                  id: 'activity-id',
+                  userId: 'user-id',
+                  type: ActivityType.BUY,
+                  symbolProfileId: expectedBuyProfileId
+                }
+              ]
+            : [
+                {
+                  id: expectedBuyProfileId,
+                  dataSource: DataSource.MANUAL,
+                  userId: 'user-id'
+                }
+              ]
+        );
+      });
+      const transaction = jest.fn(
+        async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+          callback({
+            $queryRaw:
+              queryRaw as unknown as Prisma.TransactionClient['$queryRaw'],
+            order: { update }
+          } as unknown as Prisma.TransactionClient)
+      );
+      await getUpdatedActivityData({
+        assetProfileName: 'RENAMED',
+        expectedAssetProfileId: expectedBuyProfileId,
+        transaction,
+        update,
+        userId: 'user-id'
+      });
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(lockQueries).toHaveLength(2);
+      expect(lockQueries.every((query) => query.includes('FOR UPDATE'))).toBe(
+        true
+      );
+      expect(lockQueries[0]).toContain('FROM "Order"');
+      expect(lockQueries[1]).toContain('FROM "SymbolProfile"');
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            id: 'activity-id',
+            userId: 'user-id',
+            type: ActivityType.BUY,
+            symbolProfileId: expectedBuyProfileId
+          },
+          data: expect.objectContaining({
+            SymbolProfile: {
+              update: {
+                data: expect.objectContaining({ name: 'RENAMED' }),
+                where: {
+                  id: expectedBuyProfileId,
+                  userId: 'user-id',
+                  dataSource: DataSource.MANUAL
+                }
+              }
+            }
+          })
+        })
+      );
+    });
+
     it('locks and revalidates the SELL and destination profile in the update transaction', async () => {
       const assetProfileId = 'd90f1f59-6ebf-4aa2-9e62-1e576dd8d92a';
       const lockQueries: string[] = [];
@@ -594,12 +766,14 @@ describe('ActivitiesService', () => {
         lockQueries.push(strings.join(' '));
         return Promise.resolve(
           lockQueries.length === 1
-            ? [{
-                id: 'activity-id',
-                userId: 'user-id',
-                type: ActivityType.SELL,
-                symbolProfileId: 'profile-id'
-              }]
+            ? [
+                {
+                  id: 'activity-id',
+                  userId: 'user-id',
+                  type: ActivityType.SELL,
+                  symbolProfileId: 'profile-id'
+                }
+              ]
             : [
                 {
                   id: 'profile-id',
@@ -619,7 +793,8 @@ describe('ActivitiesService', () => {
       const transaction = jest.fn(
         async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
           callback({
-            $queryRaw: queryRaw as unknown as Prisma.TransactionClient['$queryRaw'],
+            $queryRaw:
+              queryRaw as unknown as Prisma.TransactionClient['$queryRaw'],
             order: { update }
           } as unknown as Prisma.TransactionClient)
       );
@@ -636,7 +811,9 @@ describe('ActivitiesService', () => {
 
       expect(transaction).toHaveBeenCalledTimes(1);
       expect(lockQueries).toHaveLength(2);
-      expect(lockQueries.every((query) => query.includes('FOR UPDATE'))).toBe(true);
+      expect(lockQueries.every((query) => query.includes('FOR UPDATE'))).toBe(
+        true
+      );
       expect(lockQueries[1]).toContain('ORDER BY "id"');
       expect(update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -714,25 +891,22 @@ describe('ActivitiesService', () => {
       expect(update).not.toHaveBeenCalled();
     });
 
-    it.each([ActivityType.BUY, ActivityType.SELL])(
+    it.each([ActivityType.BUY])(
       'updates an explicitly named manual %s profile without changing its key',
       async (type) => {
         const data = await getUpdatedActivityData({
           activityType: type,
           assetProfileName: 'RENAMED',
+          expectedAssetProfileId: expectedBuyProfileId,
           type,
           userId: 'user-id'
         });
 
         expect(data.SymbolProfile).toEqual({
           update: {
-            data: {
-              assetClass: AssetClass.COMMODITY,
-              assetSubClass: AssetSubClass.PRECIOUS_METAL,
-              name: 'RENAMED'
-            },
+            data: { name: 'RENAMED' },
             where: {
-              id: 'profile-id',
+              id: expectedBuyProfileId,
               userId: 'user-id',
               dataSource: DataSource.MANUAL
             }
@@ -776,6 +950,7 @@ describe('ActivitiesService', () => {
         await expect(
           getUpdatedActivityData({
             assetProfileName: 'RENAMED',
+            expectedAssetProfileId: expectedBuyProfileId,
             profileDataSource,
             update,
             userId: profileOwner
@@ -787,6 +962,7 @@ describe('ActivitiesService', () => {
 
     it.each([
       { dataSource: DataSource.YAHOO, type: ActivityType.BUY },
+      { dataSource: DataSource.MANUAL, type: ActivityType.SELL },
       { dataSource: DataSource.MANUAL, type: ActivityType.FEE }
     ])(
       'rejects explicit names for unsupported source/type: %j',
@@ -796,7 +972,9 @@ describe('ActivitiesService', () => {
         await expect(
           getUpdatedActivityData({
             assetProfileName: 'RENAMED',
+            expectedAssetProfileId: expectedBuyProfileId,
             dataSource,
+            activityType: type,
             type,
             update,
             userId: 'user-id'
@@ -813,6 +991,7 @@ describe('ActivitiesService', () => {
         getUpdatedActivityData({
           activityType: ActivityType.SELL,
           assetProfileName: 'RENAMED',
+          expectedAssetProfileId: expectedBuyProfileId,
           update,
           userId: 'user-id'
         })
@@ -895,11 +1074,13 @@ describe('ActivitiesService', () => {
       assetProfileName,
       comment,
       dataSource = DataSource.MANUAL,
+      expectedAssetProfileId,
       preserveComment,
       profileDataSource = DataSource.MANUAL,
       profileOwner = 'user-id',
       profileExists = true,
       symbol = 'GF_GOLD',
+      sourceProfileId = expectedAssetProfileId ?? 'profile-id',
       type = ActivityType.BUY,
       transaction,
       update = jest.fn().mockResolvedValue({ userId: 'user-id' }),
@@ -911,11 +1092,13 @@ describe('ActivitiesService', () => {
       assetProfileName?: string;
       comment?: string;
       dataSource?: DataSource;
+      expectedAssetProfileId?: string;
       preserveComment?: boolean;
       profileDataSource?: DataSource;
       profileExists?: boolean;
       profileOwner?: string | null;
       symbol?: string;
+      sourceProfileId?: string;
       type?: ActivityType;
       transaction?: jest.Mock;
       update?: jest.Mock;
@@ -924,29 +1107,37 @@ describe('ActivitiesService', () => {
       const prismaTransaction =
         transaction ??
         jest.fn(
-          async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+          async (
+            callback: (tx: Prisma.TransactionClient) => Promise<unknown>
+          ) =>
             callback({
               $queryRaw: jest
                 .fn()
-                .mockResolvedValueOnce([{
-                  id: 'activity-id',
-                  userId: 'user-id',
-                  type: activityType,
-                  symbolProfileId: 'profile-id'
-                }])
                 .mockResolvedValueOnce([
                   {
-                    id: 'profile-id',
+                    id: 'activity-id',
+                    userId: 'user-id',
+                    type: activityType,
+                    symbolProfileId: sourceProfileId
+                  }
+                ])
+                .mockResolvedValueOnce([
+                  {
+                    id: sourceProfileId,
                     dataSource: profileDataSource,
                     symbol: 'OLD_SYMBOL',
                     userId
                   },
-                  {
-                    id: assetProfileId,
-                    dataSource,
-                    symbol,
-                    userId: profileOwner
-                  }
+                  ...(assetProfileId
+                    ? [
+                        {
+                          id: assetProfileId,
+                          dataSource,
+                          symbol,
+                          userId: profileOwner
+                        }
+                      ]
+                    : [])
                 ]),
               order: { update }
             } as unknown as Prisma.TransactionClient)
@@ -970,7 +1161,7 @@ describe('ActivitiesService', () => {
               userId: activityOwner,
               type: activityType,
               SymbolProfile: {
-                id: 'profile-id',
+                id: sourceProfileId,
                 userId,
                 dataSource: profileDataSource
               }
@@ -996,6 +1187,7 @@ describe('ActivitiesService', () => {
       const request = {
         assetProfileId,
         assetProfileName,
+        expectedAssetProfileId,
         preserveComment,
         data: {
           ...(comment !== undefined ? { comment } : {}),
