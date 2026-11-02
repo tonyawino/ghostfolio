@@ -144,3 +144,33 @@ that digest until its exact source assets and manifest are available. Use **Re-r
 image job's original digest and source checksum; this never rebuilds or retags
 the image. Repository billing or package permissions can block hosted
 jobs; a local build alone does not establish that GHCR publication succeeded.
+
+## Publication concurrency and interrupted builds
+
+GHCR version tags are mutable: GitHub's [immutable release feature does not
+protect container tags](https://github.com/orgs/community/discussions/171210).
+The registry preflight only verifies a 404 before the push; it is not an atomic
+create-if-absent operation. A second writer can push between that check and
+the image push, and a writer with package permission can change a tag later.
+The workflow concurrency group serializes its own runs for the same Git ref and
+does not cancel an in-progress run; it does not lock other workflows, API clients,
+or credentials, and a pending run can still be replaced. Limit package write
+access and do not run any other publisher for this image during a release.
+These controls reduce operational risk but do not prove no overwrite. Consumers
+must use the verified image digest, never the mutable tag.
+
+A successful image job exposes its digest and source checksum to the subsequent
+source-release job. If only that downstream job fails, rerun only failed jobs,
+which reuses those successful-job outputs without rebuilding. If the image job
+fails or is cancelled after the registry accepted a push but before GitHub
+recorded successful job outputs, the existing tag preflight deliberately blocks
+any retry. Do not delete, move, overwrite, or deploy that tag, and do not infer
+its identity from its name, image labels, or unsigned attestations. Record the
+registry digest and available run logs for investigation. Unless independently
+verified evidence establishes the exact build and source and a separately
+reviewed recovery procedure is available, abandon that release number and use
+a new, confirmed-unused version with a fresh run. Do not publish source assets
+claiming a relationship that cannot be established. A registry enforcing
+immutable tags or an atomic conditional create, plus authenticated build
+provenance, is required for stronger guarantees; this workflow does not supply
+those properties.

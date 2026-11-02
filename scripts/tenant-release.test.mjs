@@ -285,3 +285,8 @@ test('derivative release is gated on main and excluded from the general publishe
   );
   assert.match(general, /!3\.86\.0-fh\.\*/);
 });
+
+test('release runs do not cancel an in-flight publisher', () => {
+  const tenant = readFileSync('.github/workflows/tenant-image.yml', 'utf8');
+  assert.match(tenant, /cancel-in-progress:\s*false/);
+});
