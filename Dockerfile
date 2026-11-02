@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:22-slim AS builder
+FROM --platform=$BUILDPLATFORM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
 
 # Build application and add additional files
 WORKDIR /ghostfolio
@@ -49,7 +49,7 @@ COPY package.json /ghostfolio/dist/apps/api/
 RUN npm run database:generate-typings
 
 # Image to run, copy everything needed from builder
-FROM node:22-slim
+FROM node:22.23.3-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 LABEL org.opencontainers.image.source="https://github.com/ghostfolio/ghostfolio"
 ENV NODE_ENV=production
 

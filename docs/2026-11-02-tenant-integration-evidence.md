@@ -1,0 +1,7 @@
+# Tenant derivative integration evidence
+
+The integration starts from `e27c14bd1a3c69dfe7163bd410458a404999ea00` and merges the `3.86.0-fh.2` commit `5a1f09f1ba83568bf78692262a82a40c13bfa3da`. These histories diverged at `ef47c0d1b2c48fa4e97fb381561b514e657928cf`. A merge commit retains both histories; a squash would not retain the fh.2 ancestry. The tenant provisioning implementation and identity controller are unchanged from fh.2; main's account and activity idempotency models remain in the combined schema.
+
+The restored tenant image workflow checks that a release commit is reachable from `main`. The general Docker workflow excludes derivative tags so only the dedicated release workflow publishes them. No tag or image was published as part of this integration.
+
+A disposable PostgreSQL 17 upgrade used `git archive 3.86.0-fh.2 prisma` with an explicitly configured old migrations path. Prisma applied 130 fh.2 migrations; SQL verified both new idempotency tables were absent. A synthetic user and tenant binding with synthetic encrypted-token bytes were inserted. `prisma migrate deploy` with the combined migrations then applied exactly `20261029000000_account_create_idempotency` and `20261031000000_activity_create_idempotency`. SQL verified both tables exist and the tenant binding and bytes survived. This demonstrates schema migration for a synthetic row, not production data, concurrent traffic, encryption-key recovery, or a production rollout.

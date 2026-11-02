@@ -131,6 +131,23 @@ export class UserController {
     return this.rotateUserAccessToken(user.id);
   }
 
+  @Get('identity')
+  @UseGuards(AuthGuard('jwt'), ImpersonationGuard)
+  public getIdentity(
+    @Impersonation() { isActive }: ImpersonationContext
+  ): Pick<UserModel, 'id' | 'role'> {
+    if (isActive) {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.FORBIDDEN),
+        StatusCodes.FORBIDDEN
+      );
+    }
+
+    const { id, role } = this.request.user;
+
+    return { id, role };
+  }
+
   @Get()
   @UseGuards(AuthGuard('jwt'), HasPermissionGuard, ImpersonationGuard)
   @UseInterceptors(RedactValuesInResponseInterceptor)
